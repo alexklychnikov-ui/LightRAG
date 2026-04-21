@@ -124,6 +124,55 @@ class LightRAGClient:
             return False, "query empty response"
         return True, str(answer).strip()
 
+    def query_openai_general(self, question: str) -> tuple[bool, str]:
+        api_key = os.getenv("OPENAI_API_KEY", "").strip()
+        if not api_key:
+            return False, "openai api key is missing"
+        model = os.getenv("BOT_OPENAI_MODEL", "gpt-4o-mini").strip() or "gpt-4o-mini"
+        api_base = os.getenv("OPENAI_API_BASE_URL", "https://api.openai.com/v1").rstrip("/")
+        payload = {
+            "model": model,
+            "temperature": 0.3,
+            "messages": [
+                {
+                    "role": "system",
+                    "content": (
+                        "Ты технический ассистент. Отвечай кратко и по делу. "
+                        "Если не уверен, явно скажи об этом."
+                    ),
+                },
+                {"role": "user", "content": question},
+            ],
+        }
+        headers = {
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+        }
+        try:
+            response = self._request(
+                method="POST",
+                url=f"{api_base}/chat/completions",
+                json=payload,
+                headers=headers,
+                timeout=self.timeout_seconds,
+                allow_retry=True,
+            )
+        except requests.RequestException as exc:
+            return False, f"openai error={exc}"
+
+        if not (200 <= response.status_code < 300):
+            return False, f"openai status={response.status_code}"
+        try:
+            body = response.json()
+        except ValueError:
+            return False, "openai invalid json"
+        answer = (
+            (body.get("choices") or [{}])[0].get("message", {}).get("content", "")
+        )
+        if not answer:
+            return False, "openai empty response"
+        return True, str(answer).strip()
+
     def translate_to_russian(self, text: str) -> tuple[bool, str]:
         chunks = split_text_for_translation(text)
         if not chunks:
@@ -159,14 +208,17 @@ class LightRAGClient:
             tried_modes.append(mode)
             ok, answer_or_error = self.query(question, mode)
             if ok and not self._is_weak_answer(answer_or_error):
-                return True, answer_or_error, mode
+                return True, answer_or_error, f"{mode} (проверено: {','.join(tried_modes)})"
             if ok:
-                if weak_answer is None:
-                    weak_answer = answer_or_error
-                    weak_mode = mode
+                weak_answer = answer_or_error
+                weak_mode = mode
                 continue
         if weak_answer is not None and weak_mode is not None:
-            return True, weak_answer, weak_mode
+            return (
+                True,
+                weak_answer,
+                f"{weak_mode} (все режимы слабые; проверено: {','.join(tried_modes)})",
+            )
         return False, "all query modes failed", ",".join(tried_modes)
 
     def ingest_text(

@@ -40,7 +40,12 @@ class TestHandlerUtils(unittest.TestCase):
     @patch.dict("os.environ", {"BOT_QUERY_FALLBACK_MODES": "hybrid,global,hybrid,unknown"})
     def test_parse_fallback_modes(self) -> None:
         modes = _parse_fallback_modes()
-        self.assertEqual(modes, ("hybrid", "global"))
+        self.assertEqual(modes, ("hybrid", "global", "naive"))
+
+    @patch.dict("os.environ", {"BOT_QUERY_FALLBACK_MODES": "naive,global"})
+    def test_parse_fallback_modes_keeps_single_naive(self) -> None:
+        modes = _parse_fallback_modes()
+        self.assertEqual(modes, ("naive", "global"))
 
 
 if __name__ == "__main__":

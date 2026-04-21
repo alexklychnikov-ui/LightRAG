@@ -37,6 +37,7 @@ _TRACK_POLL_ATTEMPTS = 20
 _TRACK_POLL_INTERVAL_SECONDS = 3
 _DEFAULT_QUERY_MODE = "mix"
 _DEFAULT_FALLBACK_MODES = ("hybrid", "global")
+_MODEL_FALLBACK_MODE = "naive"
 _ALLOWED_QUERY_MODES = {"naive", "local", "global", "hybrid", "mix"}
 _RATE_LIMIT_MAX_EVENTS = int(os.getenv("BOT_RATE_LIMIT_MAX_EVENTS", "6"))
 _RATE_LIMIT_WINDOW_SECONDS = int(os.getenv("BOT_RATE_LIMIT_WINDOW_SECONDS", "30"))
@@ -80,13 +81,25 @@ def _rewrite_qa_question(question: str) -> str:
 def _parse_fallback_modes() -> tuple[str, ...]:
     raw = os.getenv("BOT_QUERY_FALLBACK_MODES", ",".join(_DEFAULT_FALLBACK_MODES)).strip()
     if not raw:
-        return _DEFAULT_FALLBACK_MODES
-    result = []
-    for part in raw.split(","):
-        mode = part.strip().lower()
-        if mode in _ALLOWED_QUERY_MODES and mode not in result:
-            result.append(mode)
-    return tuple(result) if result else _DEFAULT_FALLBACK_MODES
+        result = list(_DEFAULT_FALLBACK_MODES)
+    else:
+        result = []
+        for part in raw.split(","):
+            mode = part.strip().lower()
+            if mode in _ALLOWED_QUERY_MODES and mode not in result:
+                result.append(mode)
+    if _MODEL_FALLBACK_MODE in _ALLOWED_QUERY_MODES and _MODEL_FALLBACK_MODE not in result:
+        result.append(_MODEL_FALLBACK_MODE)
+    return tuple(result) if result else (_MODEL_FALLBACK_MODE,)
+
+
+def _is_openai_fallback_enabled() -> bool:
+    return os.getenv("BOT_ENABLE_OPENAI_FALLBACK", "true").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
 
 
 def _extract_inline_mode(raw_question: str) -> tuple[str | None, str]:
@@ -612,6 +625,17 @@ async def qa_question_handler(message: Message, state: FSMContext) -> None:
         return
 
     final_answer = answer_or_error
+    source_label = "LightRAG"
+    if _is_openai_fallback_enabled() and client._is_weak_answer(final_answer):
+        openai_ok, openai_answer = await asyncio.to_thread(
+            client.query_openai_general,
+            effective_question,
+        )
+        if openai_ok and not client._is_weak_answer(openai_answer):
+            final_answer = openai_answer
+            used_mode = f"{used_mode} -> openai"
+            source_label = "модель (вне RAG)"
+
     translated_mode = "оригинал"
     if is_translate_to_ru_enabled() and needs_translation_to_ru(final_answer):
         tr_ok, tr_or_err = await asyncio.to_thread(
@@ -626,7 +650,11 @@ async def qa_question_handler(message: Message, state: FSMContext) -> None:
 
     await _send_long_message(
         message,
-        f"Режим поиска: {used_mode}\nРежим ответа: {translated_mode}\n\n{final_answer}",
+        (
+            f"Режим поиска: {used_mode}\n"
+            f"Источник ответа: {source_label}\n"
+            f"Режим ответа: {translated_mode}\n\n{final_answer}"
+        ),
     )
     _metrics.inc("qa_success_total")
 

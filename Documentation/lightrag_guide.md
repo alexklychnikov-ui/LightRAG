@@ -15,6 +15,9 @@
 ## Лог работ агента
 
 - 2026-04-21 18:58:50 — Запрос: "сначала сделай readme, потом проверь gitignore + lightrag_guide.md, и запушь в GitHub с разделением веток (серверная основная / локальная вспомогательная)". Выполнено: создан `README.md`, добавлен `.gitignore`, обновлен `Documentation/lightrag_guide.md`, инициализирован git, сделаны и запушены ветки `main` и `local-helper` в `https://github.com/alexklychnikov-ui/LightRAG`.
+- 2026-04-21 19:15:38 — Запрос: проверить, проходит ли Q&A все fallback-режимы. Выполнено: исправлен `ask_with_fallback` в `telegram_bot/lightrag_client.py` — теперь ответ содержит фактически проверенные режимы; при слабом ответе во всех режимах возвращается последний режим + пометка, что все ответы слабые; добавлен unit-тест `test_ask_with_fallback_all_modes_weak`, общий прогон тестов: `41 passed`.
+- 2026-04-21 19:22:43 — Запрос: включить ответ модели последним в цепочку Q&A. Выполнено: в `telegram_bot/handlers.py` обновлен парсер fallback-режимов, теперь по умолчанию цепочка `mix -> hybrid -> global -> naive` (даже если в env не указан `naive`); добавлены/обновлены тесты `tests/test_handlers_utils.py`, прогон тестов: `42 passed`, деплой `telegram-bot` на VPS выполнен.
+- 2026-04-21 19:32:12 — Запрос: добавить работу с моделью вне RAG. Выполнено: добавлен прямой OpenAI fallback (`query_openai_general`) в `telegram_bot/lightrag_client.py`; в `telegram_bot/handlers.py` при слабом ответе всей RAG-цепочки выполняется финальный запрос к модели вне RAG и выводится `Источник ответа`; обновлен `README.md` (новые ENV: `BOT_ENABLE_OPENAI_FALLBACK`, `OPENAI_API_KEY`, `BOT_OPENAI_MODEL`, `OPENAI_API_BASE_URL`), на VPS включен `BOT_ENABLE_OPENAI_FALLBACK=true`, тесты `44 passed`, деплой выполнен.
 
 ---
 

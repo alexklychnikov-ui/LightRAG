@@ -29,6 +29,25 @@ class TestLightRAGClient(unittest.TestCase):
         self.assertFalse(ok)
         self.assertIn("query status=500", details)
 
+    @patch.dict(os.environ, {"OPENAI_API_KEY": ""}, clear=False)
+    def test_query_openai_general_without_key(self) -> None:
+        client = LightRAGClient(base_url="http://127.0.0.1:9621", api_key="secret")
+        ok, details = client.query_openai_general("Что такое Celery?")
+        self.assertFalse(ok)
+        self.assertIn("openai api key is missing", details)
+
+    @patch.dict(os.environ, {"OPENAI_API_KEY": "sk-test", "BOT_OPENAI_MODEL": "gpt-4o-mini"}, clear=False)
+    @patch("telegram_bot.lightrag_client.requests.post")
+    def test_query_openai_general_success(self, post_mock: Mock) -> None:
+        post_mock.return_value.status_code = 200
+        post_mock.return_value.json.return_value = {
+            "choices": [{"message": {"content": "Celery — это очередь задач."}}]
+        }
+        client = LightRAGClient(base_url="http://127.0.0.1:9621", api_key="secret")
+        ok, answer = client.query_openai_general("Что такое Celery?")
+        self.assertTrue(ok)
+        self.assertIn("Celery", answer)
+
     @patch.dict(os.environ, {"BOT_HTTP_RETRY_ATTEMPTS": "1", "BOT_HTTP_RETRY_BACKOFF": "0"})
     @patch("telegram_bot.lightrag_client.requests.post")
     def test_query_retries_once_then_succeeds(self, post_mock: Mock) -> None:
@@ -75,7 +94,7 @@ class TestLightRAGClient(unittest.TestCase):
 
         self.assertTrue(ok)
         self.assertEqual(answer, "fallback answer")
-        self.assertEqual(used_mode, "hybrid")
+        self.assertEqual(used_mode, "hybrid (проверено: mix,hybrid)")
 
     @patch.object(LightRAGClient, "query")
     def test_ask_with_fallback_when_mix_is_weak_answer(self, query_mock: Mock) -> None:
@@ -89,7 +108,25 @@ class TestLightRAGClient(unittest.TestCase):
 
         self.assertTrue(ok)
         self.assertIn("Клычников", answer)
-        self.assertEqual(used_mode, "hybrid")
+        self.assertEqual(used_mode, "hybrid (проверено: mix,hybrid)")
+
+    @patch.object(LightRAGClient, "query")
+    def test_ask_with_fallback_all_modes_weak(self, query_mock: Mock) -> None:
+        query_mock.side_effect = [
+            (True, "У меня недостаточно информации."),
+            (True, "Недостаточно информации в контексте."),
+            (True, "Не могу ответить по предоставленным данным."),
+        ]
+        client = LightRAGClient(base_url="http://127.0.0.1:9621", api_key="secret")
+
+        ok, answer, used_mode = client.ask_with_fallback("question", primary_mode="mix")
+
+        self.assertTrue(ok)
+        self.assertIn("Не могу ответить", answer)
+        self.assertEqual(
+            used_mode,
+            "global (все режимы слабые; проверено: mix,hybrid,global)",
+        )
 
     @patch.object(LightRAGClient, "query")
     def test_ask_with_fallback_all_failed(self, query_mock: Mock) -> None:

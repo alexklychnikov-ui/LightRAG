@@ -48,6 +48,10 @@
 - `BOT_TRANSLATE_TO_RU=true|false`
 - `BOT_QUERY_MODE=mix|hybrid|global|local|naive`
 - `BOT_QUERY_FALLBACK_MODES=hybrid,global`
+- `BOT_ENABLE_OPENAI_FALLBACK=true|false` (если `true`, после слабого ответа RAG идет прямой запрос к модели)
+- `OPENAI_API_KEY` (нужен для fallback вне RAG)
+- `BOT_OPENAI_MODEL=gpt-4o-mini`
+- `OPENAI_API_BASE_URL=https://api.openai.com/v1` (опционально для кастомного провайдера)
 - `BOT_RATE_LIMIT_MAX_EVENTS=6`
 - `BOT_RATE_LIMIT_WINDOW_SECONDS=30`
 - `BOT_HTTP_RETRY_ATTEMPTS=2`
