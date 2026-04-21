@@ -1,0 +1,56 @@
+---
+description: Shortcut aliases for @lightrag chat commands
+alwaysApply: true
+---
+
+# LightRAG Shortcuts
+
+Interpret these user shortcuts as direct LightRAG MCP actions:
+
+- `@lightrag ? <запрос>`
+  - call `search_knowledge_base` with:
+    - `query: <запрос>`
+    - `mode: "mix"`
+
+- `@lightrag + <текст>`
+  - call `add_text_to_knowledge_base` with:
+    - `text: <текст>`
+
+- `@lightrag + @<локальный_файл>`
+  - read local file content from workspace
+  - call `upsert_text_to_knowledge_base` with:
+    - `text: <contents_of_file>`
+    - `source_id: <локальный_файл>`
+    - `description: <локальный_файл>`
+    - `replace_existing: true`
+
+- `@lightrag + файл <абсолютный_путь_на_vps>`
+  - call `add_file_to_knowledge_base` with:
+    - `file_path: <абсолютный_путь_на_vps>`
+    - `replace_existing: true`
+
+- `@lightrag scan`
+  - call `scan_inputs_folder`
+
+- `@lightrag status`
+  - call `knowledge_base_status`
+
+- `@lightrag docs`
+  - call `list_documents`
+
+- `@lightrag ? как меня зовут` or `@lightrag Найди как меня зовут`
+  - call `search_knowledge_base` with:
+    - `query: "как зовут разработчика в introMain.md"`
+    - `mode: "mix"`
+
+- `@lightrag ? мой стек` or `@lightrag ? основной технический стек`
+  - call `search_knowledge_base` with:
+    - `query: "основной технологический стек разработчика в introMain.md"`
+    - `mode: "mix"`
+
+- `@lightrag ? что полезного про меня`
+  - call `search_knowledge_base` with:
+    - `query: "ключевые навыки, опыт и полезная информация о разработчике из introMain.md"`
+    - `mode: "mix"`
+
+If command is ambiguous, ask one short clarifying question with concrete options.

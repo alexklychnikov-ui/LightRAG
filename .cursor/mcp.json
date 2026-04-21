@@ -1,0 +1,13 @@
+{
+  "mcpServers": {
+    "lightrag": {
+      "command": "ssh",
+      "args": [
+        "-i",
+        "C:/Users/User/.ssh/alexklyvibe",
+        "root@193.168.196.12",
+        "LIGHTRAG_URL=http://127.0.0.1:9621 LIGHTRAG_API_KEY=$(grep '^LIGHTRAG_API_KEY=' /opt/LightRAG/.env | cut -d= -f2-) /opt/lightrag-mcp-venv/bin/python /opt/LightRAG/lightrag_mcp_server.py"
+      ]
+    }
+  }
+}

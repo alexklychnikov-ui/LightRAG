@@ -1,0 +1,26 @@
+---
+description: Auto-use LightRAG MCP for project memory and chat requests
+alwaysApply: true
+---
+
+# LightRAG MCP Default Behavior
+
+- Retrieval decision policy:
+  1) Check current repo context first for implementation/code questions.
+  2) If repo context is missing, weak, or does not answer the question, call `search_knowledge_base` (`mode: "mix"`).
+  3) If `mix` is weak/no-context, retry with `mode: "hybrid"` or `mode: "global"`.
+  4) If MCP lookup still fails, say so explicitly and continue with best available local context.
+- If MCP server `lightrag` is available, use it by default for:
+  - this project history
+  - deployment/debug incidents
+  - architecture decisions
+  - previously solved issues
+  - personal profile facts from indexed docs (for example `introMain.md`)
+- If user message starts with `@lightrag`, treat it as direct KB command:
+  - `@lightrag Добавь ...` -> call `add_text_to_knowledge_base`
+  - `@lightrag Добавь ... @<path>` -> read file content and call `upsert_text_to_knowledge_base(text=..., source_id="<path>", replace_existing=true)` (preferred for local workspace files)
+  - `@lightrag Добавь файл ...` -> call `add_file_to_knowledge_base(file_path="...", replace_existing=true)` only when a server-side absolute path is provided
+  - `@lightrag Найди ...` -> call `search_knowledge_base`
+- For profile-like questions (`как меня зовут`, `мой стек`, `что полезного про меня`), rewrite query to explicit `introMain.md` wording before `search_knowledge_base`.
+- After add operations, confirm result status and suggest `scan_inputs_folder` only if file ingestion was queued externally.
+- Do not invent KB facts when MCP search failed; explicitly say KB lookup failed and continue with local repo context.
