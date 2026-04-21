@@ -1,0 +1,40 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.pytest_cache/
+.mypy_cache/
+
+# Virtual env
+.venv/
+venv/
+env/
+
+# Secrets / env
+.env
+.env.*
+!.env.example
+
+# IDE / OS
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# Build / cache
+dist/
+build/
+*.egg-info/
+
+# Local logs/artifacts
+*.log
+deploy_log.txt
+*.code-workspace
+agent-transcripts/
+assets/
+terminals/
+
+# Keep project-specific helper outputs untracked
+.agent-remote/probe_*.py
+

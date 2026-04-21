@@ -1,0 +1,42 @@
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: lightrag
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: lightrag
+    volumes:
+      - ./data/postgres/data:/var/lib/postgresql/data
+      - ./data/postgres/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U lightrag -d lightrag"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  lightrag:
+    image: ghcr.io/hkuds/lightrag:latest
+    env_file:
+      - .env
+    ports:
+      - "127.0.0.1:9621:9621"
+    volumes:
+      - ./data/rag_storage:/app/data/rag_storage
+      - ./data/inputs:/app/data/inputs
+      - ./config.ini:/app/config.ini
+      - ./.env:/app/.env
+    deploy:
+      restart_policy:
+        condition: on-failure
+        max_attempts: 10
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      WORKING_DIR: "/app/data/rag_storage"
+      INPUT_DIR: "/app/data/inputs"
+      HOST: "0.0.0.0"
+      PORT: "9621"

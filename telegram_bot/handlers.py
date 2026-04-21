@@ -1,0 +1,650 @@
+import asyncio
+from io import BytesIO
+import logging
+import re
+from aiogram import F, Router
+from aiogram.filters import Command, CommandStart
+from aiogram.fsm.context import FSMContext
+from aiogram.types import CallbackQuery, Message
+import os
+
+from .domain import BotMode, mode_prompt
+from .file_text_extract import extract_text_from_file_bytes, is_text_like_file
+from .lightrag_client import LightRAGClient
+from .reliability import BotRuntimeMetrics, InMemoryRateLimiter, format_metrics
+from .translation import is_translate_to_ru_enabled, needs_translation_to_ru
+from .url_ingest import fetch_significant_text_from_url, is_http_url
+from .keyboards import (
+    BACK_TO_MENU_CALLBACK,
+    MENU_BUTTON_TEXT,
+    MODE_INGEST_CALLBACK,
+    MODE_QA_CALLBACK,
+    MODE_STATUS_CALLBACK,
+    QMODE_SET_PREFIX,
+    back_to_menu_inline_keyboard,
+    modes_inline_keyboard,
+    persistent_menu_keyboard,
+    qa_modes_inline_keyboard,
+)
+from .states import BotStates
+
+router = Router(name="menu-router")
+_DEFAULT_LIGHTRAG_URL = "http://127.0.0.1:9621"
+_INGEST_MAX_LEN = 4096
+_INGEST_FILE_MAX_BYTES = 20 * 1024 * 1024
+_STATUS_CODE_PATTERN = re.compile(r"status=(\d+)")
+_TRACK_POLL_ATTEMPTS = 20
+_TRACK_POLL_INTERVAL_SECONDS = 3
+_DEFAULT_QUERY_MODE = "mix"
+_DEFAULT_FALLBACK_MODES = ("hybrid", "global")
+_ALLOWED_QUERY_MODES = {"naive", "local", "global", "hybrid", "mix"}
+_RATE_LIMIT_MAX_EVENTS = int(os.getenv("BOT_RATE_LIMIT_MAX_EVENTS", "6"))
+_RATE_LIMIT_WINDOW_SECONDS = int(os.getenv("BOT_RATE_LIMIT_WINDOW_SECONDS", "30"))
+_TELEGRAM_MAX_MESSAGE_CHARS = 3900
+logger = logging.getLogger(__name__)
+_rate_limiter = InMemoryRateLimiter(
+    max_events=_RATE_LIMIT_MAX_EVENTS,
+    window_seconds=_RATE_LIMIT_WINDOW_SECONDS,
+)
+_metrics = BotRuntimeMetrics()
+
+
+def build_lightrag_client() -> LightRAGClient:
+    lightrag_url = os.getenv("LIGHTRAG_URL", _DEFAULT_LIGHTRAG_URL)
+    lightrag_api_key = os.getenv("LIGHTRAG_API_KEY", "")
+    return LightRAGClient(base_url=lightrag_url, api_key=lightrag_api_key)
+
+
+def _safe_ingest_error(details: str, target: str) -> str:
+    status_match = _STATUS_CODE_PATTERN.search(details)
+    if status_match:
+        status_code = status_match.group(1)
+        return (
+            f"Не удалось добавить {target} в LightRAG (HTTP {status_code}). "
+            "Попробуй снова."
+        )
+    return f"Не удалось добавить {target} в LightRAG. Попробуй снова."
+
+
+def _rewrite_qa_question(question: str) -> str:
+    q = (question or "").strip().lower()
+    if q in {"как меня зовут", "как меня зовут?", "кто я", "кто я?"}:
+        return "как зовут разработчика в introMain.md"
+    if q in {"мой стек", "мой стек?", "основной технический стек"}:
+        return "основной технологический стек разработчика в introMain.md"
+    if q in {"что полезного про меня", "что полезного про меня?"}:
+        return "ключевые навыки, опыт и полезная информация о разработчике из introMain.md"
+    return question
+
+
+def _parse_fallback_modes() -> tuple[str, ...]:
+    raw = os.getenv("BOT_QUERY_FALLBACK_MODES", ",".join(_DEFAULT_FALLBACK_MODES)).strip()
+    if not raw:
+        return _DEFAULT_FALLBACK_MODES
+    result = []
+    for part in raw.split(","):
+        mode = part.strip().lower()
+        if mode in _ALLOWED_QUERY_MODES and mode not in result:
+            result.append(mode)
+    return tuple(result) if result else _DEFAULT_FALLBACK_MODES
+
+
+def _extract_inline_mode(raw_question: str) -> tuple[str | None, str]:
+    question = (raw_question or "").strip()
+    # Examples:
+    #   режим:global | что ты знаешь ...
+    #   mode=hybrid: summarize ...
+    match = re.match(
+        r"^(?:режим|mode)\s*[:=]\s*(naive|local|global|hybrid|mix)\s*(?:\||:)\s*(.+)$",
+        question,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    if not match:
+        return None, question
+    mode = match.group(1).lower().strip()
+    rest = match.group(2).strip()
+    return mode, rest
+
+
+def _split_long_message(text: str, chunk_size: int = _TELEGRAM_MAX_MESSAGE_CHARS) -> list[str]:
+    value = (text or "").strip()
+    if not value:
+        return []
+    if len(value) <= chunk_size:
+        return [value]
+
+    chunks: list[str] = []
+    remaining = value
+    while remaining:
+        if len(remaining) <= chunk_size:
+            chunks.append(remaining)
+            break
+        split_at = remaining.rfind("\n", 0, chunk_size)
+        if split_at < chunk_size // 3:
+            split_at = chunk_size
+        chunks.append(remaining[:split_at].strip())
+        remaining = remaining[split_at:].strip()
+    return [chunk for chunk in chunks if chunk]
+
+
+async def _send_long_message(message: Message, text: str) -> None:
+    parts = _split_long_message(text)
+    if not parts:
+        await message.answer("Пустой ответ.", reply_markup=persistent_menu_keyboard())
+        return
+    for idx, part in enumerate(parts):
+        if idx == 0:
+            await message.answer(part, reply_markup=persistent_menu_keyboard())
+        else:
+            await message.answer(part)
+
+
+async def _apply_rate_limit(message: Message) -> bool:
+    decision = _rate_limiter.check(message.chat.id)
+    if decision.allowed:
+        return True
+    await message.answer(
+        "Слишком много запросов. "
+        f"Повтори через {decision.retry_after_seconds} сек.",
+        reply_markup=persistent_menu_keyboard(),
+    )
+    _metrics.inc("rate_limited_total")
+    return False
+
+
+async def _notify_track_status(
+    bot,
+    chat_id: int,
+    client: LightRAGClient,
+    track_id: str,
+    target: str,
+) -> None:
+    progress_points = {1, 4, 8, 12}
+    for attempt in range(1, _TRACK_POLL_ATTEMPTS + 1):
+        await asyncio.sleep(_TRACK_POLL_INTERVAL_SECONDS)
+        try:
+            ok, summary, is_terminal, is_success = await asyncio.to_thread(
+                client.track_status,
+                track_id,
+            )
+        except Exception as exc:
+            logger.warning("Track polling failed for %s: %s", track_id, exc)
+            continue
+        if not ok:
+            logger.warning("Track status check failed for %s: %s", track_id, summary)
+            continue
+        if is_terminal:
+            if is_success:
+                await bot.send_message(
+                    chat_id=chat_id,
+                    text=f"{target.capitalize()} обработан в LightRAG. {summary}",
+                )
+                _metrics.inc("track_success_total")
+            else:
+                await bot.send_message(
+                    chat_id=chat_id,
+                    text=f"{target.capitalize()} обработан с ошибками. {summary}",
+                )
+                _metrics.inc("track_failed_total")
+            return
+        if attempt in progress_points:
+            await bot.send_message(
+                chat_id=chat_id,
+                text=f"{target.capitalize()} все еще обрабатывается... {summary}",
+            )
+
+    await bot.send_message(
+        chat_id=chat_id,
+        text=(
+            f"Пока нет финального статуса обработки ({target}). "
+            "Проверь позже в меню Статус."
+        ),
+    )
+    _metrics.inc("track_timeout_total")
+
+
+async def show_modes_menu(message: Message, state: FSMContext) -> None:
+    await state.set_state(BotStates.choosing_mode)
+    await message.answer(
+        "Выбери режим работы:",
+        reply_markup=modes_inline_keyboard(),
+    )
+
+
+@router.message(CommandStart())
+async def start_handler(message: Message, state: FSMContext) -> None:
+    await state.clear()
+    await message.answer(
+        "Бот LightRAG готов к работе.",
+        reply_markup=persistent_menu_keyboard(),
+    )
+    await show_modes_menu(message=message, state=state)
+
+
+@router.message(Command("menu"))
+async def menu_command_handler(message: Message, state: FSMContext) -> None:
+    await show_modes_menu(message=message, state=state)
+
+
+@router.message(Command("qmode"))
+async def qmode_command_handler(message: Message, state: FSMContext) -> None:
+    raw = (message.text or "").strip()
+    parts = raw.split(maxsplit=1)
+    if len(parts) == 1:
+        data = await state.get_data()
+        current = data.get("qa_mode_override")
+        if current:
+            await message.answer(
+                f"Текущий режим Q&A для этого чата: {current}",
+                reply_markup=persistent_menu_keyboard(),
+            )
+        else:
+            await message.answer(
+                "Текущий режим Q&A: auto (из BOT_QUERY_MODE + fallback).",
+                reply_markup=persistent_menu_keyboard(),
+            )
+        return
+
+    mode = parts[1].strip().lower()
+    if mode in {"auto", "default"}:
+        await state.update_data(qa_mode_override=None)
+        await message.answer("Q&A режим сброшен в auto.", reply_markup=persistent_menu_keyboard())
+        return
+    if mode not in _ALLOWED_QUERY_MODES:
+        await message.answer(
+            "Неверный режим. Доступно: naive, local, global, hybrid, mix, auto.",
+            reply_markup=persistent_menu_keyboard(),
+        )
+        return
+
+    await state.update_data(qa_mode_override=mode)
+    await message.answer(
+        f"Q&A режим для этого чата установлен: {mode}",
+        reply_markup=persistent_menu_keyboard(),
+    )
+
+
+@router.callback_query(F.data.startswith(QMODE_SET_PREFIX))
+async def qmode_callback_handler(callback: CallbackQuery, state: FSMContext) -> None:
+    mode = (callback.data or "")[len(QMODE_SET_PREFIX) :].strip().lower()
+    if mode in {"auto", "default"}:
+        await state.update_data(qa_mode_override=None)
+        await callback.message.answer(
+            "Q&A режим сброшен в auto.",
+            reply_markup=qa_modes_inline_keyboard(None),
+        )
+        await callback.answer()
+        return
+    if mode not in _ALLOWED_QUERY_MODES:
+        await callback.answer("Неверный режим", show_alert=False)
+        return
+    await state.update_data(qa_mode_override=mode)
+    await callback.message.answer(
+        f"Q&A режим для этого чата установлен: {mode}",
+        reply_markup=qa_modes_inline_keyboard(mode),
+    )
+    await callback.answer()
+
+
+@router.message(F.text == MENU_BUTTON_TEXT)
+async def menu_button_handler(message: Message, state: FSMContext) -> None:
+    await show_modes_menu(message=message, state=state)
+
+
+@router.callback_query(F.data == MODE_INGEST_CALLBACK)
+async def ingest_mode_callback(callback: CallbackQuery, state: FSMContext) -> None:
+    await state.set_state(BotStates.ingest_mode)
+    await callback.message.answer(
+        mode_prompt(BotMode.INGEST),
+        reply_markup=back_to_menu_inline_keyboard(),
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data == MODE_QA_CALLBACK)
+async def qa_mode_callback(callback: CallbackQuery, state: FSMContext) -> None:
+    await state.set_state(BotStates.qa_mode)
+    data = await state.get_data()
+    current_mode = data.get("qa_mode_override")
+    await callback.message.answer(
+        "Кнопка «Меню» закреплена внизу.",
+        reply_markup=persistent_menu_keyboard(),
+    )
+    await callback.message.answer(
+        (
+            f"{mode_prompt(BotMode.QA)}\n\n"
+            "Выбери режим кнопками ниже или напиши /qmode <mode>."
+        ),
+        reply_markup=qa_modes_inline_keyboard(current_mode),
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data == MODE_STATUS_CALLBACK)
+async def status_mode_callback(callback: CallbackQuery, state: FSMContext) -> None:
+    await state.set_state(BotStates.status_mode)
+    client = build_lightrag_client()
+    ok, details = await asyncio.to_thread(client.health)
+    status_text = "OK" if ok else "FAIL"
+    metrics_text = format_metrics(_metrics.snapshot())
+    await callback.message.answer(
+        (
+            f"{mode_prompt(BotMode.STATUS)}\n\n"
+            f"LightRAG health: {status_text}\n{details}\n\n"
+            f"Bot metrics: {metrics_text}"
+        ),
+        reply_markup=back_to_menu_inline_keyboard(),
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data == BACK_TO_MENU_CALLBACK)
+async def back_to_menu_callback(callback: CallbackQuery, state: FSMContext) -> None:
+    await state.set_state(BotStates.choosing_mode)
+    await callback.message.answer(
+        "Выбери режим работы:",
+        reply_markup=modes_inline_keyboard(),
+    )
+    await callback.answer()
+
+
+@router.message(BotStates.ingest_mode, F.text)
+async def ingest_text_handler(message: Message, state: FSMContext) -> None:
+    if not await _apply_rate_limit(message):
+        return
+    _metrics.inc("ingest_text_total")
+    raw_text = message.text or ""
+    normalized_text = raw_text.strip()
+    if not normalized_text:
+        await message.answer(
+            "Пустой текст не добавляю. Отправь нормальный текст.",
+            reply_markup=persistent_menu_keyboard(),
+        )
+        return
+    if len(normalized_text) > _INGEST_MAX_LEN:
+        await message.answer(
+            f"Текст слишком длинный для одного сообщения (> {_INGEST_MAX_LEN} символов). "
+            "Разбей на несколько сообщений.",
+            reply_markup=persistent_menu_keyboard(),
+        )
+        return
+
+    client = build_lightrag_client()
+    is_url_mode = is_http_url(normalized_text)
+    translated_applied = False
+    translate_enabled = is_translate_to_ru_enabled()
+
+    if is_url_mode:
+        await message.answer("Принял ссылку. Парсю страницу и извлекаю значимую информацию...")
+        fetch_ok, extracted_or_error = await asyncio.to_thread(
+            fetch_significant_text_from_url,
+            normalized_text,
+        )
+        if not fetch_ok:
+            await message.answer(
+                "Не удалось обработать ссылку. Проверь URL и доступность сайта.",
+                reply_markup=persistent_menu_keyboard(),
+            )
+            logger.warning("URL fetch failed: %s", extracted_or_error)
+            return
+        ingest_text = extracted_or_error
+        description = f"telegram:url chat={message.chat.id} src={normalized_text}"
+    else:
+        await message.answer("Принял. Добавляю текст в базу знаний...")
+        ingest_text = normalized_text
+        description = f"telegram:text chat={message.chat.id}"
+
+    if translate_enabled and needs_translation_to_ru(ingest_text):
+        await message.answer("Обнаружен не-русский текст. Делаю авто-перевод на русский...")
+        tr_ok, tr_or_err = await asyncio.to_thread(
+            client.translate_to_russian,
+            ingest_text,
+        )
+        if tr_ok:
+            ingest_text = tr_or_err
+            description += " translated=ru"
+            translated_applied = True
+        else:
+            logger.warning("Auto-translate failed: %s", tr_or_err)
+            await message.answer("Авто-перевод не удался, отправляю оригинал.")
+
+    ok, details, track_id = await asyncio.to_thread(
+        client.ingest_text,
+        ingest_text,
+        description,
+    )
+    if ok:
+        _metrics.inc("ingest_text_success_total")
+        base_text = (
+            "Данные по ссылке отправлены в LightRAG."
+            if is_url_mode
+            else "Текст отправлен в LightRAG."
+        )
+        mode_label = "перевод" if translated_applied else "оригинал"
+        if track_id:
+            await message.answer(
+                f"{base_text} Режим: {mode_label}. Задача поставлена в обработку (ID: {track_id}).",
+                reply_markup=persistent_menu_keyboard(),
+            )
+            asyncio.create_task(
+                _notify_track_status(
+                    bot=message.bot,
+                    chat_id=message.chat.id,
+                    client=client,
+                    track_id=track_id,
+                    target="ссылка" if is_url_mode else "текст",
+                )
+            )
+        else:
+            await message.answer(
+                f"{base_text} Режим: {mode_label}. Обработка может занять немного времени.",
+                reply_markup=persistent_menu_keyboard(),
+            )
+        return
+
+    logger.warning("Text ingest failed: %s", details)
+    _metrics.inc("ingest_text_failed_total")
+    await message.answer(_safe_ingest_error(details, "ссылку" if is_url_mode else "текст"))
+
+
+@router.message(BotStates.ingest_mode, F.document)
+async def ingest_document_handler(message: Message, state: FSMContext) -> None:
+    if not await _apply_rate_limit(message):
+        return
+    _metrics.inc("ingest_file_total")
+    document = message.document
+    if document is None:
+        await message.answer("Файл не найден в сообщении.", reply_markup=persistent_menu_keyboard())
+        return
+    if document.file_size and document.file_size > _INGEST_FILE_MAX_BYTES:
+        await message.answer(
+            "Файл слишком большой для ingest через бота. "
+            "Лимит 20 MB.",
+            reply_markup=persistent_menu_keyboard(),
+        )
+        return
+
+    await message.answer("Принял файл. Добавляю в базу знаний...", reply_markup=persistent_menu_keyboard())
+    file_buffer = BytesIO()
+    try:
+        await message.bot.download(document, destination=file_buffer)
+    except Exception as exc:
+        logger.warning("Telegram file download failed: %s", exc)
+        await message.answer(
+            "Не удалось скачать файл из Telegram. Попробуй снова.",
+            reply_markup=persistent_menu_keyboard(),
+        )
+        return
+    file_bytes = file_buffer.getvalue()
+    if not file_bytes:
+        await message.answer("Не удалось прочитать файл из Telegram.", reply_markup=persistent_menu_keyboard())
+        return
+    if len(file_bytes) > _INGEST_FILE_MAX_BYTES:
+        await message.answer(
+            "Файл слишком большой для ingest через бота. "
+            "Лимит 20 MB.",
+            reply_markup=persistent_menu_keyboard(),
+        )
+        return
+
+    file_name = document.file_name or f"telegram-{document.file_id}.bin"
+    mime_type = document.mime_type
+    client = build_lightrag_client()
+    translate_enabled = is_translate_to_ru_enabled()
+
+    use_text_ingest = False
+    text_payload = None
+    if translate_enabled and is_text_like_file(file_name, mime_type):
+        text_payload = extract_text_from_file_bytes(file_bytes)
+        if text_payload:
+            use_text_ingest = True
+
+    if use_text_ingest and text_payload is not None:
+        await message.answer("Файл распознан как текст. Проверяю, нужен ли авто-перевод...")
+        final_text = text_payload
+        translated_flag = "false"
+        if needs_translation_to_ru(text_payload):
+            tr_ok, tr_or_err = await asyncio.to_thread(
+                client.translate_to_russian,
+                text_payload,
+            )
+            if tr_ok:
+                final_text = tr_or_err
+                translated_flag = "true"
+            else:
+                logger.warning("File auto-translate failed: %s", tr_or_err)
+                await message.answer(
+                    "Авто-перевод файла не удался, отправляю оригинальный текст.",
+                    reply_markup=persistent_menu_keyboard(),
+                )
+        description = (
+            f"telegram:file-text chat={message.chat.id} "
+            f"name={file_name} translated_ru={translated_flag}"
+        )
+        file_mode_label = "перевод" if translated_flag == "true" else "оригинал"
+        ok, details, track_id = await asyncio.to_thread(
+            client.ingest_text,
+            final_text,
+            description,
+        )
+    else:
+        description = f"telegram:file chat={message.chat.id}"
+        file_mode_label = "оригинал"
+        ok, details, track_id = await asyncio.to_thread(
+            client.ingest_file,
+            file_name,
+            file_bytes,
+            mime_type,
+            description,
+        )
+    if ok:
+        _metrics.inc("ingest_file_success_total")
+        base_text = "Файл отправлен в LightRAG."
+        if track_id:
+            await message.answer(
+                f"{base_text} Режим: {file_mode_label}. Задача поставлена в обработку (ID: {track_id}).",
+                reply_markup=persistent_menu_keyboard(),
+            )
+            asyncio.create_task(
+                _notify_track_status(
+                    bot=message.bot,
+                    chat_id=message.chat.id,
+                    client=client,
+                    track_id=track_id,
+                    target="файл",
+                )
+            )
+        else:
+            await message.answer(
+                f"{base_text} Режим: {file_mode_label}. Обработка может занять немного времени.",
+                reply_markup=persistent_menu_keyboard(),
+            )
+        return
+
+    logger.warning("File ingest failed: %s", details)
+    _metrics.inc("ingest_file_failed_total")
+    await message.answer(_safe_ingest_error(details, "файл"))
+
+
+@router.message(BotStates.qa_mode, F.text)
+async def qa_question_handler(message: Message, state: FSMContext) -> None:
+    if not await _apply_rate_limit(message):
+        return
+    _metrics.inc("qa_total")
+    question = (message.text or "").strip()
+    if not question:
+        await message.answer(
+            "Пустой вопрос не отправляю. Напиши вопрос текстом.",
+            reply_markup=persistent_menu_keyboard(),
+        )
+        return
+
+    inline_mode, question_without_mode = _extract_inline_mode(question)
+    effective_question = _rewrite_qa_question(question_without_mode)
+    state_data = await state.get_data()
+    configured_mode = (state_data.get("qa_mode_override") or "").strip().lower()
+    start_mode = inline_mode or configured_mode or (
+        os.getenv("BOT_QUERY_MODE", _DEFAULT_QUERY_MODE).strip().lower() or _DEFAULT_QUERY_MODE
+    )
+    if start_mode not in _ALLOWED_QUERY_MODES:
+        start_mode = _DEFAULT_QUERY_MODE
+    fallback_modes = _parse_fallback_modes()
+
+    client = build_lightrag_client()
+    await message.answer(
+        "Принял вопрос. Ищу ответ в LightRAG "
+        f"(старт: {start_mode}, fallback: {','.join(fallback_modes)})...",
+        reply_markup=persistent_menu_keyboard(),
+    )
+    ok, answer_or_error, used_mode = await asyncio.to_thread(
+        client.ask_with_fallback,
+        effective_question,
+        start_mode,
+        fallback_modes,
+    )
+    if not ok:
+        logger.warning("QA query failed: %s (%s)", answer_or_error, used_mode)
+        _metrics.inc("qa_failed_total")
+        await message.answer(
+            "Не удалось получить ответ из LightRAG. Попробуй снова.",
+            reply_markup=persistent_menu_keyboard(),
+        )
+        return
+
+    final_answer = answer_or_error
+    translated_mode = "оригинал"
+    if is_translate_to_ru_enabled() and needs_translation_to_ru(final_answer):
+        tr_ok, tr_or_err = await asyncio.to_thread(
+            client.translate_to_russian,
+            final_answer,
+        )
+        if tr_ok:
+            final_answer = tr_or_err
+            translated_mode = "перевод"
+        else:
+            logger.warning("QA auto-translate failed: %s", tr_or_err)
+
+    await _send_long_message(
+        message,
+        f"Режим поиска: {used_mode}\nРежим ответа: {translated_mode}\n\n{final_answer}",
+    )
+    _metrics.inc("qa_success_total")
+
+
+@router.errors()
+async def router_error_handler(event) -> bool:
+    logger.exception("Unhandled router error: %s", event.exception)
+    update = getattr(event, "update", None)
+    message = getattr(update, "message", None) if update else None
+    if message is None and update is not None:
+        callback_query = getattr(update, "callback_query", None)
+        if callback_query is not None:
+            message = callback_query.message
+    if message is not None:
+        await message.answer(
+            "Внутренняя ошибка бота. Попробуй еще раз.",
+            reply_markup=persistent_menu_keyboard(),
+        )
+    _metrics.inc("unhandled_errors_total")
+    return True
+

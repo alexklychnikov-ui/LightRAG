@@ -1,0 +1,14 @@
+services:
+  telegram-bot:
+    build:
+      context: .
+      dockerfile: telegram_bot/Dockerfile
+    container_name: lightrag-telegram-bot
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      LIGHTRAG_URL: "${LIGHTRAG_URL:-http://lightrag:9621}"
+    depends_on:
+      - lightrag
+

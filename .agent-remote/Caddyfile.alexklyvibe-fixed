@@ -1,0 +1,46 @@
+{
+	order forward_proxy before file_server
+	servers {
+		protocols h1
+	}
+}
+
+lightrag.alexklyvibe.ru {
+	tls {
+		issuer acme {
+			email admin@alexklyvibe.ru
+		}
+	}
+	encode gzip zstd
+	reverse_proxy 127.0.0.1:4180 {
+		header_up Host {host}
+		header_up X-Real-IP {remote_host}
+		transport http {
+			read_timeout 300s
+			write_timeout 300s
+		}
+	}
+}
+
+:443, alexklyvibe.ru, www.alexklyvibe.ru {
+	log {
+		output file /opt/naiveproxy/logs/access.log
+		format json
+	}
+	tls {
+		issuer acme {
+			disable_http_challenge
+		}
+	}
+	forward_proxy {
+		basic_auth naiveuser +dd0OJzHMdEFs/FujcjOLOvMjR4EhGXF
+		hide_ip
+		hide_via
+	}
+	header {
+		-Padding
+	}
+	file_server {
+		root /opt/naiveproxy/www
+	}
+}
