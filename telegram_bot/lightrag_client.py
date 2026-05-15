@@ -3,7 +3,7 @@ import time
 
 import requests
 
-from .translation import split_text_for_translation
+from .translation import TECHNICAL_TRANSLATION_RULES_RU, split_text_for_translation
 
 
 class LightRAGClient:
@@ -181,10 +181,8 @@ class LightRAGClient:
         translated_chunks: list[str] = []
         for chunk in chunks:
             prompt = (
-                "Сделай технический перевод следующего текста на русский язык. "
-                "Сохрани смысл и факты, не добавляй комментарии, верни только перевод. "
-                "Не переводи и не изменяй исходные названия команд, нод, API, параметров, "
-                "флагов, путей, URL, имена функций/классов и другие технические идентификаторы.\n\n"
+                f"{TECHNICAL_TRANSLATION_RULES_RU}\n\n"
+                "Фрагмент для перевода (верни только перевод):\n\n"
                 f"{chunk}"
             )
             ok, answer = self.query(prompt, mode="naive")

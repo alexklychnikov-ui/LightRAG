@@ -11,6 +11,7 @@ import os
 from .domain import BotMode, mode_prompt
 from .file_text_extract import extract_text_from_file_bytes, is_text_like_file
 from .lightrag_client import LightRAGClient
+from .qa_context import qa_conversation_store
 from .reliability import BotRuntimeMetrics, InMemoryRateLimiter, format_metrics
 from .translation import is_translate_to_ru_enabled, needs_translation_to_ru
 from .url_ingest import fetch_significant_text_from_url, is_http_url
@@ -227,6 +228,7 @@ async def show_modes_menu(message: Message, state: FSMContext) -> None:
 @router.message(CommandStart())
 async def start_handler(message: Message, state: FSMContext) -> None:
     await state.clear()
+    await qa_conversation_store.clear(message.chat.id)
     await message.answer(
         "Бот LightRAG готов к работе.",
         reply_markup=persistent_menu_keyboard(),
@@ -237,6 +239,15 @@ async def start_handler(message: Message, state: FSMContext) -> None:
 @router.message(Command("menu"))
 async def menu_command_handler(message: Message, state: FSMContext) -> None:
     await show_modes_menu(message=message, state=state)
+
+
+@router.message(Command("forgetctx", "forget_context"))
+async def forget_context_handler(message: Message, state: FSMContext) -> None:
+    await qa_conversation_store.clear(message.chat.id)
+    await message.answer(
+        "Контекст диалога для Q&A сброшен.",
+        reply_markup=persistent_menu_keyboard(),
+    )
 
 
 @router.message(Command("qmode"))
@@ -603,6 +614,12 @@ async def qa_question_handler(message: Message, state: FSMContext) -> None:
         start_mode = _DEFAULT_QUERY_MODE
     fallback_modes = _parse_fallback_modes()
 
+    await qa_conversation_store.expire_if_idle(message.chat.id)
+    contextual_question = await qa_conversation_store.build_contextual_query(
+        message.chat.id,
+        effective_question,
+    )
+
     client = build_lightrag_client()
     await message.answer(
         "Принял вопрос. Ищу ответ в LightRAG "
@@ -611,7 +628,7 @@ async def qa_question_handler(message: Message, state: FSMContext) -> None:
     )
     ok, answer_or_error, used_mode = await asyncio.to_thread(
         client.ask_with_fallback,
-        effective_question,
+        contextual_question,
         start_mode,
         fallback_modes,
     )
@@ -629,7 +646,7 @@ async def qa_question_handler(message: Message, state: FSMContext) -> None:
     if _is_openai_fallback_enabled() and client._is_weak_answer(final_answer):
         openai_ok, openai_answer = await asyncio.to_thread(
             client.query_openai_general,
-            effective_question,
+            contextual_question,
         )
         if openai_ok and not client._is_weak_answer(openai_answer):
             final_answer = openai_answer
@@ -657,6 +674,11 @@ async def qa_question_handler(message: Message, state: FSMContext) -> None:
         ),
     )
     _metrics.inc("qa_success_total")
+    await qa_conversation_store.record_exchange(
+        message.chat.id,
+        effective_question,
+        final_answer,
+    )
 
 
 @router.errors()
