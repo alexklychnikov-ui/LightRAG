@@ -38,3 +38,7 @@ terminals/
 # Keep project-specific helper outputs untracked
 .agent-remote/probe_*.py
 
+# Local documentation assets / generated mockups (not tracked)
+Docs/
+output/
+
