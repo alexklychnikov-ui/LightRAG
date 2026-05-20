@@ -39,9 +39,40 @@ class BotRuntimeMetrics:
         return dict(self._counters)
 
 
+_METRIC_LABELS_RU: dict[str, str] = {
+    "qa_total": "вопросов получено",
+    "qa_success_total": "ответов успешно",
+    "qa_failed_total": "ошибок Q&A",
+    "qa_web_judge_total": "проверок «нужен веб»",
+    "qa_web_search_triggered_total": "запусков веб-поиска",
+    "qa_web_synthesis_success_total": "синтезов с вебом",
+    "ingest_text_total": "ingest текста (всего)",
+    "ingest_text_success_total": "ingest текста (успех)",
+    "ingest_text_failed_total": "ingest текста (ошибка)",
+    "ingest_file_total": "ingest файлов (всего)",
+    "ingest_file_success_total": "ingest файлов (успех)",
+    "ingest_file_failed_total": "ingest файлов (ошибка)",
+    "track_success_total": "треков ingest (успех)",
+    "track_failed_total": "треков ingest (ошибка)",
+    "track_timeout_total": "треков ingest (таймаут)",
+    "rate_limited_total": "срабатываний rate-limit",
+    "unhandled_errors_total": "необработанных ошибок",
+}
+
+
 def format_metrics(snapshot: dict[str, int]) -> str:
-    if not snapshot:
-        return "нет данных"
-    keys = sorted(snapshot.keys())
-    return ", ".join(f"{key}={snapshot[key]}" for key in keys)
+    return format_metrics_ru(snapshot)
+
+
+def format_metrics_ru(snapshot: dict[str, int]) -> str:
+    lines: list[str] = []
+    for key in _METRIC_LABELS_RU:
+        value = int(snapshot.get(key, 0))
+        lines.append(f"• {_METRIC_LABELS_RU[key]}: {value}")
+    extra_keys = sorted(k for k in snapshot if k not in _METRIC_LABELS_RU)
+    for key in extra_keys:
+        lines.append(f"• {key}: {snapshot[key]}")
+    if not lines:
+        return "• (пока нет событий — задай вопрос или добавь в БЗ)"
+    return "\n".join(lines)
 

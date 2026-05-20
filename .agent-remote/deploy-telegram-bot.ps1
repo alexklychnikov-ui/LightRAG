@@ -46,7 +46,7 @@ Write-Step "Build and start telegram-bot container on server"
 $deployCommand = @"
 set -e
 cd $RemoteDir
-docker compose -f docker-compose.yml -f docker-compose.telegram-bot.yml up -d --build telegram-bot
+docker compose -f docker-compose.yml -f docker-compose.telegram-bot.yml up -d --build --force-recreate telegram-bot
 docker compose -f docker-compose.yml -f docker-compose.telegram-bot.yml ps telegram-bot
 "@
 ssh -i $KeyPath $target $deployCommand

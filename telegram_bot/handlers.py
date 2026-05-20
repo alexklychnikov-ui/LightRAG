@@ -3,16 +3,24 @@ from io import BytesIO
 import logging
 import re
 from aiogram import F, Router
-from aiogram.filters import Command, CommandStart
+from aiogram.filters import Command, CommandStart, StateFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message
 import os
 
 from .domain import BotMode, mode_prompt
 from .file_text_extract import extract_text_from_file_bytes, is_text_like_file
+from .answer_completeness import assess_rag_answer
 from .lightrag_client import LightRAGClient
 from .qa_context import qa_conversation_store
-from .reliability import BotRuntimeMetrics, InMemoryRateLimiter, format_metrics
+from .web_answer_synthesis import (
+    answer_body_without_references,
+    format_answer_with_references,
+    synthesize_with_web,
+)
+from .web_search import WebSearchResult, is_web_search_enabled, search_web
+from .reliability import BotRuntimeMetrics, InMemoryRateLimiter
+from .status_report import build_status_report_text
 from .translation import is_translate_to_ru_enabled, needs_translation_to_ru
 from .url_ingest import fetch_significant_text_from_url, is_http_url
 from .keyboards import (
@@ -76,6 +84,20 @@ def _rewrite_qa_question(question: str) -> str:
         return "основной технологический стек разработчика в introMain.md"
     if q in {"что полезного про меня", "что полезного про меня?"}:
         return "ключевые навыки, опыт и полезная информация о разработчике из introMain.md"
+    if q in {
+        "где я живу",
+        "где я живу?",
+        "где я живу сейчас",
+        "где я живу сейчас?",
+        "мой город",
+        "мой город?",
+        "где я проживаю",
+        "где я проживаю?",
+    } or re.search(r"\bгде\s+я\s+жив", q):
+        return (
+            "в каком городе проживает разработчик Клычников Александр Васильевич "
+            "по резюме и документам в базе знаний (Иркутск и связанные факты)"
+        )
     return question
 
 
@@ -101,6 +123,83 @@ def _is_openai_fallback_enabled() -> bool:
         "yes",
         "on",
     }
+
+
+async def _try_enrich_with_web_search(
+    message: Message,
+    client: LightRAGClient,
+    *,
+    contextual_question: str,
+    effective_question: str,
+    rag_answer: str,
+    used_mode: str,
+) -> tuple[str, str, str, tuple[WebSearchResult, ...], str]:
+    empty_notice = ""
+    if not is_web_search_enabled():
+        return rag_answer, "LightRAG", used_mode, (), empty_notice
+
+    chat_context = await qa_conversation_store.get_dialog_context_block(message.chat.id)
+    judge_question = effective_question.strip() or contextual_question.strip()
+    assess_ok, verdict, assess_err = await asyncio.to_thread(
+        assess_rag_answer,
+        judge_question,
+        rag_answer,
+        chat_context=chat_context,
+        client=client,
+    )
+    _metrics.inc("qa_web_judge_total")
+    if not assess_ok or verdict is None:
+        logger.warning("QA web judge failed: %s", assess_err)
+        return rag_answer, "LightRAG", used_mode, (), empty_notice
+    if not verdict.needs_web:
+        return rag_answer, "LightRAG", used_mode, (), empty_notice
+
+    _metrics.inc("qa_web_search_triggered_total")
+    await message.answer(
+        "Дополняю ответ поиском в интернете…",
+        reply_markup=persistent_menu_keyboard(),
+    )
+
+    search_ok, results, search_err = await asyncio.to_thread(
+        search_web,
+        list(verdict.queries),
+    )
+    if not search_ok or not results:
+        logger.warning("QA web search failed: %s", search_err)
+        return (
+            rag_answer,
+            "LightRAG",
+            used_mode,
+            (),
+            "Не удалось дополнить ответ из интернета (поиск).",
+        )
+
+    synth_ok, outcome, synth_err = await asyncio.to_thread(
+        synthesize_with_web,
+        judge_question,
+        rag_answer,
+        results,
+        chat_context=chat_context,
+        client=client,
+    )
+    if not synth_ok or outcome is None:
+        logger.warning("QA web synthesis failed: %s", synth_err)
+        return (
+            rag_answer,
+            "LightRAG",
+            used_mode,
+            (),
+            "Не удалось дополнить ответ из интернета (синтез).",
+        )
+
+    _metrics.inc("qa_web_synthesis_success_total")
+    return (
+        outcome.answer,
+        "LightRAG + интернет",
+        f"{used_mode} -> web",
+        outcome.references,
+        "",
+    )
 
 
 def _extract_inline_mode(raw_question: str) -> tuple[str | None, str]:
@@ -344,21 +443,34 @@ async def qa_mode_callback(callback: CallbackQuery, state: FSMContext) -> None:
     await callback.answer()
 
 
-@router.callback_query(F.data == MODE_STATUS_CALLBACK)
-async def status_mode_callback(callback: CallbackQuery, state: FSMContext) -> None:
+async def _send_status_report(message: Message, state: FSMContext) -> None:
     await state.set_state(BotStates.status_mode)
     client = build_lightrag_client()
     ok, details = await asyncio.to_thread(client.health)
-    status_text = "OK" if ok else "FAIL"
-    metrics_text = format_metrics(_metrics.snapshot())
-    await callback.message.answer(
-        (
-            f"{mode_prompt(BotMode.STATUS)}\n\n"
-            f"LightRAG health: {status_text}\n{details}\n\n"
-            f"Bot metrics: {metrics_text}"
-        ),
-        reply_markup=back_to_menu_inline_keyboard(),
+    text = await build_status_report_text(
+        state,
+        _metrics,
+        lightrag_ok=ok,
+        lightrag_details=details,
     )
+    text = f"{text}\n\nОбновить: /status"
+    parts = _split_long_message(text)
+    for idx, part in enumerate(parts):
+        if idx == 0:
+            markup = persistent_menu_keyboard()
+        elif idx == len(parts) - 1:
+            markup = back_to_menu_inline_keyboard()
+        else:
+            markup = None
+        await message.answer(part, reply_markup=markup)
+
+
+@router.callback_query(F.data == MODE_STATUS_CALLBACK)
+async def status_mode_callback(callback: CallbackQuery, state: FSMContext) -> None:
+    if callback.message is None:
+        await callback.answer()
+        return
+    await _send_status_report(callback.message, state)
     await callback.answer()
 
 
@@ -590,6 +702,31 @@ async def ingest_document_handler(message: Message, state: FSMContext) -> None:
     await message.answer(_safe_ingest_error(details, "файл"))
 
 
+@router.message(BotStates.choosing_mode, F.text)
+async def choosing_mode_text_handler(message: Message, state: FSMContext) -> None:
+    text = (message.text or "").strip()
+    if text == MENU_BUTTON_TEXT:
+        return
+    await state.set_state(BotStates.qa_mode)
+    await qa_question_handler(message, state)
+
+
+@router.message(Command("status"))
+async def status_command_handler(message: Message, state: FSMContext) -> None:
+    await _send_status_report(message, state)
+
+
+@router.message(BotStates.status_mode, F.text)
+async def status_mode_text_handler(message: Message, state: FSMContext) -> None:
+    text = (message.text or "").strip()
+    if text == MENU_BUTTON_TEXT:
+        return
+    if text.lower().startswith("/status"):
+        await _send_status_report(message, state)
+        return
+    await _send_status_report(message, state)
+
+
 @router.message(BotStates.qa_mode, F.text)
 async def qa_question_handler(message: Message, state: FSMContext) -> None:
     if not await _apply_rate_limit(message):
@@ -641,17 +778,34 @@ async def qa_question_handler(message: Message, state: FSMContext) -> None:
         )
         return
 
-    final_answer = answer_or_error
-    source_label = "LightRAG"
-    if _is_openai_fallback_enabled() and client._is_weak_answer(final_answer):
+    rag_answer = answer_or_error
+    final_answer, source_label, used_mode, web_references, web_notice = (
+        await _try_enrich_with_web_search(
+            message,
+            client,
+            contextual_question=contextual_question,
+            effective_question=effective_question,
+            rag_answer=rag_answer,
+            used_mode=used_mode,
+        )
+    )
+    web_enriched = bool(web_references)
+
+    if (
+        _is_openai_fallback_enabled()
+        and not web_enriched
+        and client.is_weak_answer(final_answer)
+    ):
         openai_ok, openai_answer = await asyncio.to_thread(
             client.query_openai_general,
             contextual_question,
         )
-        if openai_ok and not client._is_weak_answer(openai_answer):
+        if openai_ok and not client.is_weak_answer(openai_answer):
             final_answer = openai_answer
-            used_mode = f"{used_mode} -> openai"
+            base_mode = used_mode.split(" -> web")[0]
+            used_mode = f"{base_mode} -> openai"
             source_label = "модель (вне RAG)"
+            web_references = ()
 
     translated_mode = "оригинал"
     if is_translate_to_ru_enabled() and needs_translation_to_ru(final_answer):
@@ -665,20 +819,33 @@ async def qa_question_handler(message: Message, state: FSMContext) -> None:
         else:
             logger.warning("QA auto-translate failed: %s", tr_or_err)
 
+    if web_references:
+        final_answer = format_answer_with_references(final_answer, web_references)
+
+    notice_prefix = f"{web_notice}\n\n" if web_notice else ""
     await _send_long_message(
         message,
         (
             f"Режим поиска: {used_mode}\n"
             f"Источник ответа: {source_label}\n"
-            f"Режим ответа: {translated_mode}\n\n{final_answer}"
+            f"Режим ответа: {translated_mode}\n\n{notice_prefix}{final_answer}"
         ),
     )
     _metrics.inc("qa_success_total")
     await qa_conversation_store.record_exchange(
         message.chat.id,
         effective_question,
-        final_answer,
+        answer_body_without_references(final_answer),
     )
+
+
+@router.message(F.text, StateFilter(None))
+async def fallback_text_handler(message: Message, state: FSMContext) -> None:
+    text = (message.text or "").strip()
+    if text == MENU_BUTTON_TEXT:
+        return
+    await state.set_state(BotStates.qa_mode)
+    await qa_question_handler(message, state)
 
 
 @router.errors()

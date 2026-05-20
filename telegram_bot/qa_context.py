@@ -102,6 +102,13 @@ class QaConversationStore:
                 removed += 1
         return removed
 
+    async def get_dialog_context_block(self, chat_id: int) -> str:
+        async with self._lock:
+            session = self._sessions.get(chat_id)
+            if not session or not session.messages:
+                return ""
+            return _format_messages_block(session.messages).strip()
+
     async def build_contextual_query(self, chat_id: int, current_question: str) -> str:
         q = (current_question or "").strip()
         async with self._lock:

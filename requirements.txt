@@ -1,4 +1,6 @@
 aiogram==3.27.0
 requests==2.33.1
 beautifulsoup4==4.12.3
+tavily-python==0.7.24
+ddgs==9.14.4
 

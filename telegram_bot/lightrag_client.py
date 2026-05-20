@@ -1,4 +1,6 @@
+import json
 import os
+import re
 import time
 
 import requests
@@ -32,17 +34,45 @@ class LightRAGClient:
             return 0
 
     @staticmethod
-    def _is_weak_answer(answer: str) -> bool:
-        text = (answer or "").lower()
+    def is_weak_answer(answer: str) -> bool:
+        text = (answer or "").lower().strip()
+        if not text:
+            return True
         weak_markers = (
             "недостаточно информации",
             "нет достаточной информации",
             "не могу ответить",
+            "не могу предоставить",
+            "не могу дать ответ",
+            "не располагаю информацией",
             "not enough information",
             "insufficient information",
             "i don't have enough information",
+            "cannot provide an answer",
+            "can't provide an answer",
+            "unable to answer",
+            "unable to provide",
+            "sorry, i cannot",
+            "sorry, i can't",
         )
-        return any(marker in text for marker in weak_markers)
+        if any(marker in text for marker in weak_markers):
+            return True
+        if len(text) < 280 and re.search(
+            r"^(извините|sorry)[,.]?\s+(я\s+)?(не\s+могу|cannot|can't)",
+            text,
+        ):
+            return True
+        return False
+
+    _is_weak_answer = is_weak_answer
+
+    @staticmethod
+    def openai_timeout_seconds() -> int:
+        try:
+            value = int(os.getenv("BOT_OPENAI_TIMEOUT_SECONDS", "45"))
+        except ValueError:
+            value = 45
+        return max(15, min(value, 120))
 
     def _request(self, method: str, url: str, **kwargs):
         method_upper = method.upper()
@@ -124,7 +154,13 @@ class LightRAGClient:
             return False, "query empty response"
         return True, str(answer).strip()
 
-    def query_openai_general(self, question: str) -> tuple[bool, str]:
+    def query_openai_chat(
+        self,
+        system_prompt: str,
+        user_prompt: str,
+        *,
+        temperature: float = 0.3,
+    ) -> tuple[bool, str]:
         api_key = os.getenv("OPENAI_API_KEY", "").strip()
         if not api_key:
             return False, "openai api key is missing"
@@ -132,16 +168,10 @@ class LightRAGClient:
         api_base = os.getenv("OPENAI_API_BASE_URL", "https://api.openai.com/v1").rstrip("/")
         payload = {
             "model": model,
-            "temperature": 0.3,
+            "temperature": temperature,
             "messages": [
-                {
-                    "role": "system",
-                    "content": (
-                        "Ты технический ассистент. Отвечай кратко и по делу. "
-                        "Если не уверен, явно скажи об этом."
-                    ),
-                },
-                {"role": "user", "content": question},
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
             ],
         }
         headers = {
@@ -154,7 +184,7 @@ class LightRAGClient:
                 url=f"{api_base}/chat/completions",
                 json=payload,
                 headers=headers,
-                timeout=self.timeout_seconds,
+                timeout=self.openai_timeout_seconds(),
                 allow_retry=True,
             )
         except requests.RequestException as exc:
@@ -172,6 +202,76 @@ class LightRAGClient:
         if not answer:
             return False, "openai empty response"
         return True, str(answer).strip()
+
+    def query_openai_general(self, question: str) -> tuple[bool, str]:
+        return self.query_openai_chat(
+            (
+                "Ты технический ассистент. Отвечай кратко и по делу. "
+                "Если не уверен, явно скажи об этом."
+            ),
+            question,
+        )
+
+    def query_openai_json(
+        self,
+        system_prompt: str,
+        user_prompt: str,
+        *,
+        temperature: float = 0.1,
+    ) -> tuple[bool, dict | str]:
+        api_key = os.getenv("OPENAI_API_KEY", "").strip()
+        if not api_key:
+            return False, "openai api key is missing"
+        model = os.getenv("BOT_OPENAI_MODEL", "gpt-4o-mini").strip() or "gpt-4o-mini"
+        api_base = os.getenv("OPENAI_API_BASE_URL", "https://api.openai.com/v1").rstrip("/")
+        payload = {
+            "model": model,
+            "temperature": temperature,
+            "response_format": {"type": "json_object"},
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+        }
+        headers = {
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+        }
+        try:
+            response = self._request(
+                method="POST",
+                url=f"{api_base}/chat/completions",
+                json=payload,
+                headers=headers,
+                timeout=self.openai_timeout_seconds(),
+                allow_retry=True,
+            )
+        except requests.RequestException as exc:
+            return False, f"openai error={exc}"
+
+        if not (200 <= response.status_code < 300):
+            return False, f"openai status={response.status_code}"
+        try:
+            body = response.json()
+        except ValueError:
+            return False, "openai invalid json"
+        content = (body.get("choices") or [{}])[0].get("message", {}).get("content", "")
+        if not content:
+            return False, "openai empty response"
+        raw = str(content).strip()
+        try:
+            parsed = json.loads(raw)
+        except json.JSONDecodeError:
+            match = re.search(r"\{[\s\S]*\}", raw)
+            if not match:
+                return False, "openai response is not valid json"
+            try:
+                parsed = json.loads(match.group(0))
+            except json.JSONDecodeError:
+                return False, "openai response is not valid json"
+        if not isinstance(parsed, dict):
+            return False, "openai json root must be object"
+        return True, parsed
 
     def translate_to_russian(self, text: str) -> tuple[bool, str]:
         chunks = split_text_for_translation(text)

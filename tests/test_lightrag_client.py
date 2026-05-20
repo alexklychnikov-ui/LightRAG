@@ -38,6 +38,19 @@ class TestLightRAGClient(unittest.TestCase):
 
     @patch.dict(os.environ, {"OPENAI_API_KEY": "sk-test", "BOT_OPENAI_MODEL": "gpt-4o-mini"}, clear=False)
     @patch("telegram_bot.lightrag_client.requests.post")
+    def test_query_openai_json_success(self, post_mock: Mock) -> None:
+        post_mock.return_value.status_code = 200
+        post_mock.return_value.json.return_value = {
+            "choices": [{"message": {"content": '{"needs_web": false, "queries": []}'}}]
+        }
+        client = LightRAGClient(base_url="http://127.0.0.1:9621", api_key="secret")
+        ok, payload = client.query_openai_json("sys", "user")
+        self.assertTrue(ok)
+        self.assertIsInstance(payload, dict)
+        self.assertFalse(payload.get("needs_web"))
+
+    @patch.dict(os.environ, {"OPENAI_API_KEY": "sk-test", "BOT_OPENAI_MODEL": "gpt-4o-mini"}, clear=False)
+    @patch("telegram_bot.lightrag_client.requests.post")
     def test_query_openai_general_success(self, post_mock: Mock) -> None:
         post_mock.return_value.status_code = 200
         post_mock.return_value.json.return_value = {
@@ -95,6 +108,16 @@ class TestLightRAGClient(unittest.TestCase):
         self.assertTrue(ok)
         self.assertEqual(answer, "fallback answer")
         self.assertEqual(used_mode, "hybrid (проверено: mix,hybrid)")
+
+    def test_is_weak_answer_refusal_phrases(self) -> None:
+        self.assertTrue(
+            LightRAGClient.is_weak_answer(
+                "Извините, я не могу предоставить ответ на этот вопрос."
+            )
+        )
+        self.assertTrue(
+            LightRAGClient.is_weak_answer("Sorry, I cannot provide an answer to this question.")
+        )
 
     @patch.object(LightRAGClient, "query")
     def test_ask_with_fallback_when_mix_is_weak_answer(self, query_mock: Mock) -> None:

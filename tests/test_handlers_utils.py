@@ -32,6 +32,11 @@ class TestHandlerUtils(unittest.TestCase):
         rewritten = _rewrite_qa_question("Как меня зовут?")
         self.assertEqual(rewritten, "как зовут разработчика в introMain.md")
 
+    def test_rewrite_where_i_live(self) -> None:
+        rewritten = _rewrite_qa_question("где я живу")
+        self.assertIn("городе", rewritten)
+        self.assertIn("Клычников", rewritten)
+
     def test_extract_inline_mode(self) -> None:
         mode, question = _extract_inline_mode("режим:global | что ты знаешь?")
         self.assertEqual(mode, "global")

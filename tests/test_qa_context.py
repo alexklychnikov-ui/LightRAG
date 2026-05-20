@@ -31,6 +31,13 @@ class TestQaConversationStore(unittest.IsolatedAsyncioTestCase):
         out = await store.build_contextual_query(99, "next")
         self.assertEqual(out, "next")
 
+    async def test_get_dialog_context_block(self) -> None:
+        store = QaConversationStore()
+        await store.record_exchange(42, "привет", "ответ")
+        block = await store.get_dialog_context_block(42)
+        self.assertIn("Пользователь", block)
+        self.assertIn("привет", block)
+
     @patch.dict(os.environ, {"BOT_QA_SESSION_IDLE_MINUTES": "0"})
     async def test_idle_zero_disables_ttl(self) -> None:
         from telegram_bot import qa_context as qc
