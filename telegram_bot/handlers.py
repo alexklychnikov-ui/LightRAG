@@ -48,6 +48,14 @@ _DEFAULT_QUERY_MODE = "mix"
 _DEFAULT_FALLBACK_MODES = ("hybrid", "global")
 _MODEL_FALLBACK_MODE = "naive"
 _ALLOWED_QUERY_MODES = {"naive", "local", "global", "hybrid", "mix"}
+_STATUS_REFRESH_WORDS = frozenset({"статус", "обновить", "refresh", "status"})
+
+
+def _is_status_refresh_text(text: str) -> bool:
+    t = text.strip().lower()
+    if t.startswith("/status"):
+        return True
+    return t in _STATUS_REFRESH_WORDS
 _RATE_LIMIT_MAX_EVENTS = int(os.getenv("BOT_RATE_LIMIT_MAX_EVENTS", "6"))
 _RATE_LIMIT_WINDOW_SECONDS = int(os.getenv("BOT_RATE_LIMIT_WINDOW_SECONDS", "30"))
 _TELEGRAM_MAX_MESSAGE_CHARS = 3900
@@ -453,7 +461,7 @@ async def _send_status_report(message: Message, state: FSMContext) -> None:
         lightrag_ok=ok,
         lightrag_details=details,
     )
-    text = f"{text}\n\nОбновить: /status"
+    text = f"{text}\n\nОбновить: /status или «статус». Любой другой текст — вопрос в Q&A."
     parts = _split_long_message(text)
     for idx, part in enumerate(parts):
         if idx == 0:
@@ -721,10 +729,11 @@ async def status_mode_text_handler(message: Message, state: FSMContext) -> None:
     text = (message.text or "").strip()
     if text == MENU_BUTTON_TEXT:
         return
-    if text.lower().startswith("/status"):
+    if _is_status_refresh_text(text):
         await _send_status_report(message, state)
         return
-    await _send_status_report(message, state)
+    await state.set_state(BotStates.qa_mode)
+    await qa_question_handler(message, state)
 
 
 @router.message(BotStates.qa_mode, F.text)

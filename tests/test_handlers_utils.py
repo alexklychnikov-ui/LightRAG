@@ -3,6 +3,7 @@ from unittest.mock import patch
 
 from telegram_bot.handlers import (
     _extract_inline_mode,
+    _is_status_refresh_text,
     _parse_fallback_modes,
     _rewrite_qa_question,
     _safe_ingest_error,
@@ -36,6 +37,11 @@ class TestHandlerUtils(unittest.TestCase):
         rewritten = _rewrite_qa_question("где я живу")
         self.assertIn("городе", rewritten)
         self.assertIn("Клычников", rewritten)
+
+    def test_is_status_refresh_text(self) -> None:
+        self.assertTrue(_is_status_refresh_text("/status"))
+        self.assertTrue(_is_status_refresh_text("  статус "))
+        self.assertFalse(_is_status_refresh_text("Перечисли где я работал"))
 
     def test_extract_inline_mode(self) -> None:
         mode, question = _extract_inline_mode("режим:global | что ты знаешь?")
