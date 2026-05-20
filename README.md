@@ -134,6 +134,24 @@ References:
 
 ## Надёжность и безопасность
 
+### Доступ только для владельца (Telegram ACL)
+
+По умолчанию бот **открыт для всех**, кто знает `@username` и нажал Start. Чтобы ограничить доступ только собой:
+
+```env
+BOT_ALLOWED_USER_IDS=123456789
+BOT_DENY_GROUP_CHATS=true
+BOT_ACCESS_CONTROL_REQUIRED=true
+```
+
+- `BOT_ALLOWED_USER_IDS` — твой Telegram **user id** (узнать: [@userinfobot](https://t.me/userinfobot)).
+- `TELEGRAM_BOT_CHATID` — тот же id в личке с ботом тоже подойдёт (добавляется в allowlist).
+- `BOT_DENY_GROUP_CHATS=true` — отклонять группы/супергруппы (рекомендуется).
+- `BOT_ACCESS_CONTROL_REQUIRED=true` — не стартовать бот без настроенного allowlist.
+- `BOT_ACCESS_DENIED_MESSAGE` — текст отказа в личке (опционально).
+
+Проверка в **middleware** до всех хендлеров: сообщения, файлы, inline-кнопки, `/start`.
+
 - **Rate limit** per chat (`BOT_RATE_LIMIT_*`).
 - **HTTP retries** для query/GET; ingest POST **без** повторов (нет дублей документов).
 - Учёт заголовка `Retry-After` при 429.
@@ -226,7 +244,11 @@ Documentation/lightrag_guide.md
 
 | Переменная | По умолчанию |
 |------------|--------------|
-| `TELEGRAM_BOT_CHATID` | опционально |
+| `TELEGRAM_BOT_CHATID` | опционально; в личке обычно = твой user id |
+| `BOT_ALLOWED_USER_IDS` | whitelist user id через запятую |
+| `BOT_DENY_GROUP_CHATS` | `true` — не обслуживать группы |
+| `BOT_ACCESS_CONTROL_REQUIRED` | `true` — падать при старте без allowlist |
+| `BOT_ACCESS_DENIED_MESSAGE` | текст отказа неавторизованным |
 | `BOT_RATE_LIMIT_MAX_EVENTS` | `6` |
 | `BOT_RATE_LIMIT_WINDOW_SECONDS` | `30` |
 | `BOT_HTTP_RETRY_ATTEMPTS` | `2` |
