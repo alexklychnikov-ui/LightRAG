@@ -5,19 +5,32 @@ import time
 
 import requests
 
+from .openai_models import openai_model_supports_temperature, resolve_openai_model
 from .translation import TECHNICAL_TRANSLATION_RULES_RU, split_text_for_translation
 
 
 class LightRAGClient:
+    @staticmethod
+    def _default_timeout_seconds() -> int:
+        try:
+            value = int(os.getenv("BOT_LIGHTRAG_TIMEOUT_SECONDS", "20"))
+        except ValueError:
+            value = 20
+        return max(10, min(value, 180))
+
     def __init__(
         self,
         base_url: str,
         api_key: str | None = None,
-        timeout_seconds: int = 20,
+        timeout_seconds: int | None = None,
     ) -> None:
         self.base_url = base_url.rstrip("/")
         self.api_key = (api_key or "").strip() or None
-        self.timeout_seconds = timeout_seconds
+        self.timeout_seconds = (
+            timeout_seconds
+            if timeout_seconds is not None
+            else self._default_timeout_seconds()
+        )
         self.retry_attempts = max(0, int(os.getenv("BOT_HTTP_RETRY_ATTEMPTS", "2")))
         self.retry_backoff_seconds = float(os.getenv("BOT_HTTP_RETRY_BACKOFF", "0.7"))
 
@@ -154,26 +167,32 @@ class LightRAGClient:
             return False, "query empty response"
         return True, str(answer).strip()
 
+    @staticmethod
+    def _openai_model_name(model: str | None = None) -> str:
+        return resolve_openai_model(model)
+
     def query_openai_chat(
         self,
         system_prompt: str,
         user_prompt: str,
         *,
         temperature: float = 0.3,
+        model: str | None = None,
     ) -> tuple[bool, str]:
         api_key = os.getenv("OPENAI_API_KEY", "").strip()
         if not api_key:
             return False, "openai api key is missing"
-        model = os.getenv("BOT_OPENAI_MODEL", "gpt-4o-mini").strip() or "gpt-4o-mini"
+        model_name = self._openai_model_name(model)
         api_base = os.getenv("OPENAI_API_BASE_URL", "https://api.openai.com/v1").rstrip("/")
-        payload = {
-            "model": model,
-            "temperature": temperature,
+        payload: dict = {
+            "model": model_name,
             "messages": [
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt},
             ],
         }
+        if openai_model_supports_temperature(model_name):
+            payload["temperature"] = temperature
         headers = {
             "Authorization": f"Bearer {api_key}",
             "Content-Type": "application/json",
@@ -203,13 +222,19 @@ class LightRAGClient:
             return False, "openai empty response"
         return True, str(answer).strip()
 
-    def query_openai_general(self, question: str) -> tuple[bool, str]:
+    def query_openai_general(
+        self,
+        question: str,
+        *,
+        model: str | None = None,
+    ) -> tuple[bool, str]:
         return self.query_openai_chat(
             (
                 "Ты технический ассистент. Отвечай кратко и по делу. "
                 "Если не уверен, явно скажи об этом."
             ),
             question,
+            model=model,
         )
 
     def query_openai_json(
@@ -218,21 +243,23 @@ class LightRAGClient:
         user_prompt: str,
         *,
         temperature: float = 0.1,
+        model: str | None = None,
     ) -> tuple[bool, dict | str]:
         api_key = os.getenv("OPENAI_API_KEY", "").strip()
         if not api_key:
             return False, "openai api key is missing"
-        model = os.getenv("BOT_OPENAI_MODEL", "gpt-4o-mini").strip() or "gpt-4o-mini"
+        model_name = self._openai_model_name(model)
         api_base = os.getenv("OPENAI_API_BASE_URL", "https://api.openai.com/v1").rstrip("/")
-        payload = {
-            "model": model,
-            "temperature": temperature,
+        payload: dict = {
+            "model": model_name,
             "response_format": {"type": "json_object"},
             "messages": [
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt},
             ],
         }
+        if openai_model_supports_temperature(model_name):
+            payload["temperature"] = temperature
         headers = {
             "Authorization": f"Bearer {api_key}",
             "Content-Type": "application/json",

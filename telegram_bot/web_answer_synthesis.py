@@ -171,6 +171,7 @@ def synthesize_with_web(
     *,
     chat_context: str = "",
     client: LightRAGClient | None = None,
+    model: str | None = None,
 ) -> tuple[bool, WebSynthesisOutcome | None, str]:
     q = (question or "").strip()
     rag = (rag_answer or "").strip()
@@ -196,6 +197,7 @@ def synthesize_with_web(
         _SYNTHESIS_SYSTEM_PROMPT,
         user_prompt,
         temperature=0.25,
+        model=model,
     )
     if not ok:
         return False, None, str(answer_or_err)

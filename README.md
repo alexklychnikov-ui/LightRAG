@@ -115,6 +115,7 @@ References:
 | `/start` | Сброс FSM и контекста Q&A |
 | `/status` | Обновить экран статуса |
 | `/qmode <mode>` | Режим retrieval для чата |
+| `/omodel <id>` | Модель OpenAI для Q&A (judge, веб-синтез, fallback); inline-кнопки с ценами |
 | `/forgetctx` | Сброс истории Q&A |
 
 После перезапуска бота FSM сбрасывается: текст из меню автоматически уходит в Q&A; надёжнее — `/start` → «Задать вопрос».
@@ -199,7 +200,7 @@ Documentation/lightrag_guide.md
 | Переменная | По умолчанию | Описание |
 |------------|--------------|----------|
 | `OPENAI_API_KEY` | — | Judge, синтез, fallback, перевод |
-| `BOT_OPENAI_MODEL` | `gpt-4o-mini` | Модель OpenAI |
+| `BOT_OPENAI_MODEL` | `o4-mini` | Модель OpenAI по умолчанию (Q&A judge/синтез/fallback; каталог обновляется при старте) |
 | `OPENAI_API_BASE_URL` | `https://api.openai.com/v1` | Совместимые API |
 | `BOT_OPENAI_TIMEOUT_SECONDS` | `45` | Таймаут OpenAI-вызовов |
 

@@ -8,6 +8,12 @@ from .domain import BotMode, mode_prompt
 from .qa_context import qa_session_ttl_enabled
 from .reliability import BotRuntimeMetrics, format_metrics_ru
 from .states import BotStates
+from .openai_models import (
+    get_available_openai_models,
+    get_openai_models_refresh_note,
+    resolve_openai_model,
+)
+from .deep_qa import deep_qa_blocks_openai_fallback, is_deep_qa_enabled
 from .web_search import is_web_search_enabled, web_search_provider_name
 
 _BOT_STARTED_AT = time.time()
@@ -40,6 +46,9 @@ def _qa_settings_lines(state_data: dict) -> list[str]:
     default_mode = os.getenv("BOT_QUERY_MODE", "mix").strip().lower() or "mix"
     fallback = os.getenv("BOT_QUERY_FALLBACK_MODES", "hybrid,global").strip()
     override = (state_data.get("qa_mode_override") or "").strip().lower()
+    model_override = (state_data.get("qa_openai_model_override") or "").strip().lower()
+    active_model = resolve_openai_model(model_override or None)
+    model_catalog = ", ".join(m.model_id for m in get_available_openai_models())
     lines = [
         f"• стартовый режим LightRAG: {default_mode}",
         f"• цепочка fallback: {fallback}, naive",
@@ -53,8 +62,22 @@ def _qa_settings_lines(state_data: dict) -> list[str]:
         + (f" ({web_search_provider_name()})" if is_web_search_enabled() else "")
     )
     lines.append(
+        f"• глубокий Q&A (multi-RAG): {'вкл' if is_deep_qa_enabled() else 'выкл'}"
+    )
+    if is_deep_qa_enabled():
+        lines.append(
+            "• deep: блок OpenAI без БЗ: "
+            f"{'да' if deep_qa_blocks_openai_fallback() else 'нет'}"
+        )
+    lines.append(
         f"• OpenAI вне RAG: {'вкл' if _flag_on('BOT_ENABLE_OPENAI_FALLBACK', 'true') else 'выкл'}"
     )
+    if model_override:
+        lines.append(f"• модель OpenAI (чат): {active_model} (override)")
+    else:
+        lines.append(f"• модель OpenAI (чат): {active_model} (default)")
+    lines.append(f"• каталог моделей: {model_catalog or '—'}")
+    lines.append(f"• обновление каталога: {get_openai_models_refresh_note()}")
     lines.append(
         f"• перевод ответов RU: {'вкл' if _flag_on('BOT_TRANSLATE_TO_RU', 'false') else 'выкл'}"
     )

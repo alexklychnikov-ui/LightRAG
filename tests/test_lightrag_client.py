@@ -36,9 +36,10 @@ class TestLightRAGClient(unittest.TestCase):
         self.assertFalse(ok)
         self.assertIn("openai api key is missing", details)
 
-    @patch.dict(os.environ, {"OPENAI_API_KEY": "sk-test", "BOT_OPENAI_MODEL": "gpt-4o-mini"}, clear=False)
+    @patch.dict(os.environ, {"OPENAI_API_KEY": "sk-test", "BOT_OPENAI_MODEL": "o4-mini"}, clear=False)
+    @patch("telegram_bot.openai_models.refresh_openai_models_catalog")
     @patch("telegram_bot.lightrag_client.requests.post")
-    def test_query_openai_json_success(self, post_mock: Mock) -> None:
+    def test_query_openai_json_success(self, post_mock: Mock, _refresh_mock: Mock) -> None:
         post_mock.return_value.status_code = 200
         post_mock.return_value.json.return_value = {
             "choices": [{"message": {"content": '{"needs_web": false, "queries": []}'}}]
@@ -49,9 +50,10 @@ class TestLightRAGClient(unittest.TestCase):
         self.assertIsInstance(payload, dict)
         self.assertFalse(payload.get("needs_web"))
 
-    @patch.dict(os.environ, {"OPENAI_API_KEY": "sk-test", "BOT_OPENAI_MODEL": "gpt-4o-mini"}, clear=False)
+    @patch.dict(os.environ, {"OPENAI_API_KEY": "sk-test", "BOT_OPENAI_MODEL": "o4-mini"}, clear=False)
+    @patch("telegram_bot.openai_models.refresh_openai_models_catalog")
     @patch("telegram_bot.lightrag_client.requests.post")
-    def test_query_openai_general_success(self, post_mock: Mock) -> None:
+    def test_query_openai_general_success(self, post_mock: Mock, _refresh_mock: Mock) -> None:
         post_mock.return_value.status_code = 200
         post_mock.return_value.json.return_value = {
             "choices": [{"message": {"content": "Celery — это очередь задач."}}]
@@ -60,6 +62,25 @@ class TestLightRAGClient(unittest.TestCase):
         ok, answer = client.query_openai_general("Что такое Celery?")
         self.assertTrue(ok)
         self.assertIn("Celery", answer)
+
+    @patch.dict(os.environ, {"OPENAI_API_KEY": "sk-test"}, clear=False)
+    @patch("telegram_bot.lightrag_client.requests.post")
+    def test_query_openai_chat_uses_model_override(self, post_mock: Mock) -> None:
+        import telegram_bot.openai_models as openai_models
+
+        openai_models._available_models = ()
+        with patch("telegram_bot.openai_models.requests.get") as get_mock:
+            get_mock.return_value.status_code = 500
+            openai_models.refresh_openai_models_catalog()
+        post_mock.return_value.status_code = 200
+        post_mock.return_value.json.return_value = {
+            "choices": [{"message": {"content": "ok"}}]
+        }
+        client = LightRAGClient(base_url="http://127.0.0.1:9621", api_key="secret")
+        ok, _ = client.query_openai_chat("sys", "user", model="gpt-5.4")
+        self.assertTrue(ok)
+        payload = post_mock.call_args.kwargs["json"]
+        self.assertEqual(payload["model"], "gpt-5.4")
 
     @patch.dict(os.environ, {"BOT_HTTP_RETRY_ATTEMPTS": "1", "BOT_HTTP_RETRY_BACKOFF": "0"})
     @patch("telegram_bot.lightrag_client.requests.post")

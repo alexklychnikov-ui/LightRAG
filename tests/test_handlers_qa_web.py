@@ -20,6 +20,7 @@ class TestTryEnrichWithWebSearch(unittest.IsolatedAsyncioTestCase):
             effective_question="q",
             rag_answer="rag",
             used_mode="mix",
+            openai_model="o4-mini",
         )
         self.assertEqual(body, "rag")
         self.assertEqual(source, "LightRAG")
@@ -72,6 +73,7 @@ class TestTryEnrichWithWebSearch(unittest.IsolatedAsyncioTestCase):
             effective_question="Когда Python 3.13?",
             rag_answer="Не знаю даты.",
             used_mode="mix (проверено: mix)",
+            openai_model="o4-mini",
         )
 
         self.assertEqual(body, "Синтез.")
@@ -82,6 +84,9 @@ class TestTryEnrichWithWebSearch(unittest.IsolatedAsyncioTestCase):
         message.answer.assert_awaited_once()
         search_mock.assert_called_once()
         synth_mock.assert_called_once()
+        assess_mock.assert_called_once()
+        self.assertEqual(assess_mock.call_args.kwargs.get("model"), "o4-mini")
+        self.assertEqual(synth_mock.call_args.kwargs.get("model"), "o4-mini")
 
     @patch("telegram_bot.handlers.synthesize_with_web")
     @patch("telegram_bot.handlers.search_web")
@@ -113,6 +118,7 @@ class TestTryEnrichWithWebSearch(unittest.IsolatedAsyncioTestCase):
             effective_question="q",
             rag_answer="rag",
             used_mode="mix",
+            openai_model="o4-mini",
         )
         self.assertEqual(body, "rag")
         self.assertEqual(refs, ())

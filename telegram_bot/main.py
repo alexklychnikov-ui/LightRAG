@@ -12,6 +12,7 @@ from .access_control import (
 )
 from .config import load_config
 from .handlers import router
+from .openai_models import refresh_openai_models_catalog
 from .qa_context import qa_session_ttl_enabled, session_prune_loop
 
 logger = logging.getLogger(__name__)
@@ -50,6 +51,7 @@ async def run_bot() -> None:
             "Access control DISABLED: set BOT_ALLOWED_USER_IDS or TELEGRAM_BOT_CHATID"
         )
     await bot.delete_webhook(drop_pending_updates=True)
+    await asyncio.to_thread(refresh_openai_models_catalog)
     prune_task: asyncio.Task | None = None
     if qa_session_ttl_enabled():
         prune_task = asyncio.create_task(session_prune_loop(60.0), name="qa-session-prune")

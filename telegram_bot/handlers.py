@@ -11,6 +11,12 @@ import os
 from .domain import BotMode, mode_prompt
 from .file_text_extract import extract_text_from_file_bytes, is_text_like_file
 from .answer_completeness import assess_rag_answer
+from .deep_qa import (
+    deep_qa_blocks_openai_fallback,
+    deep_qa_skips_web_enrichment,
+    is_deep_qa_enabled,
+    run_deep_qa,
+)
 from .lightrag_client import LightRAGClient
 from .qa_context import qa_conversation_store
 from .web_answer_synthesis import (
@@ -29,11 +35,18 @@ from .keyboards import (
     MODE_INGEST_CALLBACK,
     MODE_QA_CALLBACK,
     MODE_STATUS_CALLBACK,
+    OMODEL_SET_PREFIX,
     QMODE_SET_PREFIX,
     back_to_menu_inline_keyboard,
     modes_inline_keyboard,
     persistent_menu_keyboard,
     qa_modes_inline_keyboard,
+    qa_openai_models_inline_keyboard,
+)
+from .openai_models import (
+    get_available_openai_models,
+    is_allowed_openai_model,
+    resolve_openai_model,
 )
 from .states import BotStates
 
@@ -133,6 +146,18 @@ def _is_openai_fallback_enabled() -> bool:
     }
 
 
+def _qa_openai_model_from_state(state_data: dict) -> str:
+    override = (state_data.get("qa_openai_model_override") or "").strip().lower()
+    return resolve_openai_model(override or None)
+
+
+def _openai_model_price_hint(model_id: str) -> str:
+    for info in get_available_openai_models():
+        if info.model_id == model_id:
+            return info.price_label()
+    return ""
+
+
 async def _try_enrich_with_web_search(
     message: Message,
     client: LightRAGClient,
@@ -141,6 +166,7 @@ async def _try_enrich_with_web_search(
     effective_question: str,
     rag_answer: str,
     used_mode: str,
+    openai_model: str,
 ) -> tuple[str, str, str, tuple[WebSearchResult, ...], str]:
     empty_notice = ""
     if not is_web_search_enabled():
@@ -154,6 +180,7 @@ async def _try_enrich_with_web_search(
         rag_answer,
         chat_context=chat_context,
         client=client,
+        model=openai_model,
     )
     _metrics.inc("qa_web_judge_total")
     if not assess_ok or verdict is None:
@@ -189,6 +216,7 @@ async def _try_enrich_with_web_search(
         results,
         chat_context=chat_context,
         client=client,
+        model=openai_model,
     )
     if not synth_ok or outcome is None:
         logger.warning("QA web synthesis failed: %s", synth_err)
@@ -357,6 +385,46 @@ async def forget_context_handler(message: Message, state: FSMContext) -> None:
     )
 
 
+@router.message(Command("omodel"))
+async def omodel_command_handler(message: Message, state: FSMContext) -> None:
+    raw = (message.text or "").strip()
+    parts = raw.split(maxsplit=1)
+    data = await state.get_data()
+    current = _qa_openai_model_from_state(data)
+    if len(parts) == 1:
+        hint = _openai_model_price_hint(current)
+        price = f" ({hint})" if hint else ""
+        await message.answer(
+            f"Текущая модель OpenAI для Q&A: {current}{price}",
+            reply_markup=qa_openai_models_inline_keyboard(current),
+        )
+        return
+
+    model = parts[1].strip().lower()
+    if model in {"auto", "default"}:
+        await state.update_data(qa_openai_model_override=None)
+        resolved = resolve_openai_model(None)
+        await message.answer(
+            f"Модель OpenAI сброшена в default: {resolved}",
+            reply_markup=qa_openai_models_inline_keyboard(resolved),
+        )
+        return
+    if not is_allowed_openai_model(model):
+        catalog = ", ".join(m.model_id for m in get_available_openai_models())
+        await message.answer(
+            f"Неверная модель. Доступно: {catalog}",
+            reply_markup=qa_openai_models_inline_keyboard(current),
+        )
+        return
+
+    await state.update_data(qa_openai_model_override=model)
+    hint = _openai_model_price_hint(model)
+    await message.answer(
+        f"Модель OpenAI для Q&A: {model} ({hint})",
+        reply_markup=qa_openai_models_inline_keyboard(model),
+    )
+
+
 @router.message(Command("qmode"))
 async def qmode_command_handler(message: Message, state: FSMContext) -> None:
     raw = (message.text or "").strip()
@@ -393,6 +461,21 @@ async def qmode_command_handler(message: Message, state: FSMContext) -> None:
         f"Q&A режим для этого чата установлен: {mode}",
         reply_markup=persistent_menu_keyboard(),
     )
+
+
+@router.callback_query(F.data.startswith(OMODEL_SET_PREFIX))
+async def omodel_callback_handler(callback: CallbackQuery, state: FSMContext) -> None:
+    model = (callback.data or "")[len(OMODEL_SET_PREFIX) :].strip().lower()
+    if not is_allowed_openai_model(model):
+        await callback.answer("Модель недоступна", show_alert=False)
+        return
+    await state.update_data(qa_openai_model_override=model)
+    hint = _openai_model_price_hint(model)
+    await callback.message.answer(
+        f"Модель OpenAI для Q&A: {model} ({hint})",
+        reply_markup=qa_openai_models_inline_keyboard(model),
+    )
+    await callback.answer()
 
 
 @router.callback_query(F.data.startswith(QMODE_SET_PREFIX))
@@ -441,12 +524,18 @@ async def qa_mode_callback(callback: CallbackQuery, state: FSMContext) -> None:
         "Кнопка «Меню» закреплена внизу.",
         reply_markup=persistent_menu_keyboard(),
     )
+    openai_model = _qa_openai_model_from_state(data)
     await callback.message.answer(
         (
             f"{mode_prompt(BotMode.QA)}\n\n"
-            "Выбери режим кнопками ниже или напиши /qmode <mode>."
+            "Режим LightRAG: кнопки ниже или /qmode <mode>.\n"
+            f"Модель OpenAI: {openai_model} ({_openai_model_price_hint(openai_model)}) — /omodel"
         ),
         reply_markup=qa_modes_inline_keyboard(current_mode),
+    )
+    await callback.message.answer(
+        "Выбери модель OpenAI (judge / веб-синтез / fallback):",
+        reply_markup=qa_openai_models_inline_keyboard(openai_model),
     )
     await callback.answer()
 
@@ -752,6 +841,7 @@ async def qa_question_handler(message: Message, state: FSMContext) -> None:
     inline_mode, question_without_mode = _extract_inline_mode(question)
     effective_question = _rewrite_qa_question(question_without_mode)
     state_data = await state.get_data()
+    openai_model = _qa_openai_model_from_state(state_data)
     configured_mode = (state_data.get("qa_mode_override") or "").strip().lower()
     start_mode = inline_mode or configured_mode or (
         os.getenv("BOT_QUERY_MODE", _DEFAULT_QUERY_MODE).strip().lower() or _DEFAULT_QUERY_MODE
@@ -767,47 +857,98 @@ async def qa_question_handler(message: Message, state: FSMContext) -> None:
     )
 
     client = build_lightrag_client()
-    await message.answer(
-        "Принял вопрос. Ищу ответ в LightRAG "
-        f"(старт: {start_mode}, fallback: {','.join(fallback_modes)})...",
-        reply_markup=persistent_menu_keyboard(),
-    )
-    ok, answer_or_error, used_mode = await asyncio.to_thread(
-        client.ask_with_fallback,
-        contextual_question,
-        start_mode,
-        fallback_modes,
-    )
-    if not ok:
-        logger.warning("QA query failed: %s (%s)", answer_or_error, used_mode)
-        _metrics.inc("qa_failed_total")
+    model_hint = _openai_model_price_hint(openai_model)
+    chat_context = await qa_conversation_store.get_dialog_context_block(message.chat.id)
+    deep_task_type = ""
+    used_deep_qa = False
+
+    if is_deep_qa_enabled():
         await message.answer(
-            "Не удалось получить ответ из LightRAG. Попробуй снова.",
+            "Принял вопрос. Глубокий поиск в базе знаний "
+            f"(несколько запросов LightRAG; OpenAI: {openai_model} {model_hint})…",
             reply_markup=persistent_menu_keyboard(),
         )
-        return
-
-    rag_answer = answer_or_error
-    final_answer, source_label, used_mode, web_references, web_notice = (
-        await _try_enrich_with_web_search(
-            message,
-            client,
-            contextual_question=contextual_question,
-            effective_question=effective_question,
-            rag_answer=rag_answer,
-            used_mode=used_mode,
+        deep_ok, deep_outcome, deep_err = await asyncio.to_thread(
+            run_deep_qa,
+            contextual_question,
+            effective_question,
+            client=client,
+            primary_mode=start_mode,
+            fallback_modes=fallback_modes,
+            chat_context=chat_context,
+            openai_model=openai_model,
         )
-    )
+        if deep_ok and deep_outcome is not None:
+            _metrics.inc("qa_deep_success_total")
+            used_deep_qa = True
+            rag_answer = deep_outcome.answer
+            used_mode = deep_outcome.mode_label
+            deep_task_type = deep_outcome.task_type
+            if deep_err:
+                logger.info("Deep QA plan note: %s", deep_err)
+        else:
+            _metrics.inc("qa_deep_fallback_total")
+            logger.warning("Deep QA failed, fallback to single query: %s", deep_err)
+            await message.answer(
+                "Глубокий поиск не удался, пробую обычный запрос в LightRAG…",
+                reply_markup=persistent_menu_keyboard(),
+            )
+
+    if not used_deep_qa:
+        await message.answer(
+            "Принял вопрос. Ищу ответ в LightRAG "
+            f"(старт: {start_mode}, fallback: {','.join(fallback_modes)}; "
+            f"OpenAI: {openai_model} {model_hint})...",
+            reply_markup=persistent_menu_keyboard(),
+        )
+        ok, answer_or_error, used_mode = await asyncio.to_thread(
+            client.ask_with_fallback,
+            contextual_question,
+            start_mode,
+            fallback_modes,
+        )
+        if not ok:
+            logger.warning("QA query failed: %s (%s)", answer_or_error, used_mode)
+            _metrics.inc("qa_failed_total")
+            await message.answer(
+                "Не удалось получить ответ из LightRAG. Попробуй снова.",
+                reply_markup=persistent_menu_keyboard(),
+            )
+            return
+        rag_answer = answer_or_error
+
+    skip_web = used_deep_qa and deep_qa_skips_web_enrichment(deep_task_type)
+    if skip_web:
+        final_answer = rag_answer
+        source_label = "LightRAG (глубокий, только БЗ)"
+        web_references: tuple = ()
+        web_notice = ""
+    else:
+        final_answer, source_label, used_mode, web_references, web_notice = (
+            await _try_enrich_with_web_search(
+                message,
+                client,
+                contextual_question=contextual_question,
+                effective_question=effective_question,
+                rag_answer=rag_answer,
+                used_mode=used_mode,
+                openai_model=openai_model,
+            )
+        )
     web_enriched = bool(web_references)
 
+    openai_fallback_allowed = _is_openai_fallback_enabled() and not (
+        used_deep_qa and deep_qa_blocks_openai_fallback()
+    )
     if (
-        _is_openai_fallback_enabled()
+        openai_fallback_allowed
         and not web_enriched
         and client.is_weak_answer(final_answer)
     ):
         openai_ok, openai_answer = await asyncio.to_thread(
             client.query_openai_general,
             contextual_question,
+            model=openai_model,
         )
         if openai_ok and not client.is_weak_answer(openai_answer):
             final_answer = openai_answer
@@ -836,6 +977,7 @@ async def qa_question_handler(message: Message, state: FSMContext) -> None:
         message,
         (
             f"Режим поиска: {used_mode}\n"
+            f"Модель OpenAI: {openai_model}\n"
             f"Источник ответа: {source_label}\n"
             f"Режим ответа: {translated_mode}\n\n{notice_prefix}{final_answer}"
         ),

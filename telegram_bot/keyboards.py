@@ -5,6 +5,8 @@ from aiogram.types import (
     ReplyKeyboardMarkup,
 )
 
+from .openai_models import OMODEL_SET_PREFIX, get_available_openai_models
+
 MENU_BUTTON_TEXT = "Меню"
 BACK_TO_MENU_CALLBACK = "menu:open"
 MODE_INGEST_CALLBACK = "mode:ingest"
@@ -107,4 +109,33 @@ def qa_modes_inline_keyboard(current_mode: str | None) -> InlineKeyboardMarkup:
             ],
         ]
     )
+
+
+def qa_openai_models_inline_keyboard(
+    current_model: str | None,
+) -> InlineKeyboardMarkup:
+    models = get_available_openai_models()
+    rows: list[list[InlineKeyboardButton]] = []
+    row: list[InlineKeyboardButton] = []
+    for info in models:
+        row.append(
+            InlineKeyboardButton(
+                text=info.button_label(selected=current_model == info.model_id),
+                callback_data=f"{OMODEL_SET_PREFIX}{info.model_id}",
+            )
+        )
+        if len(row) == 2:
+            rows.append(row)
+            row = []
+    if row:
+        rows.append(row)
+    rows.append(
+        [
+            InlineKeyboardButton(
+                text="Назад в меню",
+                callback_data=BACK_TO_MENU_CALLBACK,
+            )
+        ]
+    )
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 

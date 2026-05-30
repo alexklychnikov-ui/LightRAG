@@ -177,6 +177,7 @@ def assess_rag_answer(
     *,
     chat_context: str = "",
     client: LightRAGClient | None = None,
+    model: str | None = None,
 ) -> tuple[bool, CompletenessVerdict | None, str]:
     q = (question or "").strip()
     answer = (rag_answer or "").strip()
@@ -202,6 +203,7 @@ def assess_rag_answer(
     ok, payload_or_err = active_client.query_openai_json(
         _JUDGE_SYSTEM_PROMPT,
         _build_user_prompt(q, answer, chat_context),
+        model=model,
     )
     if not ok:
         return False, None, str(payload_or_err)
