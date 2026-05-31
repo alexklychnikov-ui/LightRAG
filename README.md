@@ -27,10 +27,11 @@ Telegram
 telegram-bot (aiogram 3, FSM)
    ├─ Ingest: текст / файл / URL → LightRAG API
    └─ Q&A:
-        1) LightRAG (цепочка режимов)
+        0) Deep Q&A (опционально): LLM-план → 3+ подзапроса в LightRAG → синтез из БЗ
+        1) LightRAG (цепочка режимов) — если deep выкл или упал
         2) LLM-judge: нужен ли веб?
         3) Tavily Search + синтез ответа + References
-        4) OpenAI fallback (если всё ещё «слабый» ответ)
+        4) OpenAI fallback (если всё ещё «слабый» ответ; для deep/resume часто блокируется)
         5) опционально перевод на RU
 ```
 
@@ -71,7 +72,12 @@ telegram-bot (aiogram 3, FSM)
 
 ### Цепочка ответа
 
-1. **LightRAG** — стартовый режим (`BOT_QUERY_MODE`, по умолчанию `mix`) и fallback: `hybrid` → `global` → `naive` (настраивается).
+0. **Deep Q&A** (если `BOT_ENABLE_DEEP_QA=true`, по умолчанию вкл):
+   - LLM строит план: тип задачи + **минимум 3 подзапроса** (триада: суть / детали / источники в БЗ);
+   - каждый подзапрос — отдельный RAG с fallback;
+   - финальный синтез **только из фрагментов БЗ** (без выдуманных фактов);
+   - для `resume` / `document` по умолчанию **без веба и без OpenAI вне RAG**.
+1. **LightRAG** — одиночный запрос, если deep выключен или упал (стартовый режим `BOT_QUERY_MODE`, fallback: `hybrid` → `global` → `naive`).
 2. **Проверка «слабого» ответа** — отказы вроде «не могу предоставить ответ», «недостаточно информации» запускают следующий режим, а не останавливают цепочку на первом шаге.
 3. **Веб-поиск** (если `BOT_ENABLE_WEB_SEARCH=true`):
    - LLM оценивает, полон ли ответ из БЗ;
@@ -113,12 +119,14 @@ References:
 | **Задать вопрос** | Q&A с контекстом и fallback |
 | **Статус** | Health LightRAG, настройки Q&A, счётчики, аптайм |
 | `/start` | Сброс FSM и контекста Q&A |
-| `/status` | Обновить экран статуса |
+| `/status` | Обновить экран статуса (или слово «статус» на экране статуса) |
 | `/qmode <mode>` | Режим retrieval для чата |
-| `/omodel <id>` | Модель OpenAI для Q&A (judge, веб-синтез, fallback); inline-кнопки с ценами |
+| `/omodel <id>` | Модель OpenAI для Q&A (judge, deep, веб-синтез, fallback); inline-кнопки с ценами |
 | `/forgetctx` | Сброс истории Q&A |
 
 После перезапуска бота FSM сбрасывается: текст из меню автоматически уходит в Q&A; надёжнее — `/start` → «Задать вопрос».
+
+**Экран «Статус»:** пока активен `status_mode`, `/status` или «статус» / «обновить» обновляют отчёт; **любой другой текст** трактуется как вопрос и уходит в Q&A (не застревает на статусе).
 
 ---
 
@@ -128,8 +136,8 @@ References:
 - активный режим UI (меню / ingest / Q&A / статус);
 - аптайм процесса с последнего рестарта;
 - LightRAG health и URL;
-- настройки Q&A: режимы, fallback, веб, OpenAI fallback, перевод, TTL контекста;
-- **счётчики на русском** (вопросы, ingest, веб-поиски, ошибки) — с нуля после каждого рестарта контейнера.
+- настройки Q&A: режимы, fallback, **deep Q&A**, веб, OpenAI fallback, модель OpenAI, перевод, TTL контекста;
+- **счётчики на русском** (вопросы, deep Q&A, ingest, веб-поиски, ошибки) — с нуля после каждого рестарта контейнера.
 
 ---
 
@@ -144,6 +152,8 @@ BOT_ALLOWED_USER_IDS=123456789
 BOT_DENY_GROUP_CHATS=true
 BOT_ACCESS_CONTROL_REQUIRED=true
 ```
+
+На VPS (прод): ACL **включён** — без `BOT_ALLOWED_USER_IDS` или `TELEGRAM_BOT_CHATID` бот не стартует при `BOT_ACCESS_CONTROL_REQUIRED=true`.
 
 - `BOT_ALLOWED_USER_IDS` — твой Telegram **user id** (узнать: [@userinfobot](https://t.me/userinfobot)).
 - `TELEGRAM_BOT_CHATID` — тот же id в личке с ботом тоже подойдёт (добавляется в allowlist).
@@ -167,9 +177,12 @@ BOT_ACCESS_CONTROL_REQUIRED=true
 
 ```text
 telegram_bot/
-  main.py              # точка входа, polling
+  main.py              # точка входа, polling, ACL startup guard
   handlers.py          # Telegram-хендлеры, Q&A pipeline
+  access_control.py    # allowlist user id, deny groups
+  deep_qa.py           # multi-RAG: план → подзапросы → синтез из БЗ
   lightrag_client.py   # API LightRAG + OpenAI chat/json
+  openai_models.py     # каталог моделей, /omodel
   web_search.py        # Tavily / ddgs
   answer_completeness.py
   web_answer_synthesis.py
@@ -181,6 +194,7 @@ telegram_bot/
 tests/                 # unit-тесты (pytest)
 .agent-remote/         # deploy-telegram-bot.ps1, compose overlays
 Documentation/lightrag_guide.md
+README.md              # этот файл (копируется на VPS в /opt/LightRAG/)
 ```
 
 ---
@@ -215,6 +229,17 @@ Documentation/lightrag_guide.md
 | `BOT_QA_SESSION_IDLE_MINUTES` | `20` | TTL контекста Q&A (`0` = выкл) |
 | `BOT_QA_CONTEXT_MAX_MESSAGES` | `24` | Лимит реплик в памяти |
 | `BOT_QA_CONTEXT_MAX_CHARS` | `7000` | Лимит символов контекста |
+
+### Deep Q&A (multi-RAG)
+
+| Переменная | По умолчанию | Описание |
+|------------|--------------|----------|
+| `BOT_ENABLE_DEEP_QA` | `true` | Планировщик + несколько RAG-подзапросов + синтез |
+| `BOT_DEEP_QA_MIN_SUBQUERIES` | `3` | Минимум подзапросов (триада суть/детали/источники) |
+| `BOT_DEEP_QA_MAX_SUBQUERIES` | `8` | Максимум подзапросов |
+| `BOT_DEEP_QA_MAX_EVIDENCE_CHARS` | `28000` | Лимит текста evidence для синтеза |
+| `BOT_DEEP_QA_SKIP_WEB` | `true` | Не вызывать веб для `resume` / `document` после deep |
+| `BOT_DEEP_QA_BLOCK_OPENAI_FALLBACK` | `true` | Не подменять deep-ответ OpenAI вне RAG |
 
 ### Веб-поиск (Tavily)
 
@@ -259,9 +284,14 @@ Documentation/lightrag_guide.md
 
 ```env
 TELEGRAM_BOT_TOKEN=...
+TELEGRAM_BOT_CHATID=123456789
+BOT_ALLOWED_USER_IDS=123456789
+BOT_ACCESS_CONTROL_REQUIRED=true
+BOT_DENY_GROUP_CHATS=true
 LIGHTRAG_URL=http://lightrag:9621
 LIGHTRAG_API_KEY=...
 OPENAI_API_KEY=...
+BOT_ENABLE_DEEP_QA=true
 BOT_ENABLE_WEB_SEARCH=true
 TAVILY_API_KEY=tvly-...
 BOT_ENABLE_OPENAI_FALLBACK=true
@@ -304,6 +334,12 @@ powershell -ExecutionPolicy Bypass -File ".agent-remote/deploy-telegram-bot.ps1"
 - проверяет `TELEGRAM_BOT_TOKEN` в `/opt/LightRAG/.env`;
 - `docker compose ... up -d --build --force-recreate telegram-bot`.
 
+`README.md` на VPS обновляется отдельно (не входит в deploy-скрипт):
+
+```powershell
+scp -i C:\Users\User\.ssh\alexklyvibe README.md root@193.168.196.12:/opt/LightRAG/README.md
+```
+
 Проверка логов:
 
 ```bash
@@ -329,7 +365,7 @@ docker logs lightrag-telegram-bot --tail 100 -f
 python -m pytest -q
 ```
 
-Покрытие: ingest, URL/SSRF, fallback RAG, веб-поиск, judge, синтез, контекст Q&A, статус, порядок хендлеров.
+Покрытие: ingest, URL/SSRF, fallback RAG, **deep Q&A**, веб-поиск, judge, синтез, контекст Q&A, **ACL**, статус, порядок хендлеров.
 
 ---
 
