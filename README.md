@@ -3,11 +3,13 @@
 
 
 
-![Mockup](docs/mockups/mockup-20260531-104213.png)
 
-![Mockup](Docs/mockups/mockup-20260531-103820.png)
 
-![Mockup](docs/mockups/mockup-20260531-103413.png)
+
+
+<!-- MOCKUPS:START -->
+![Mockup](Docs/mockups/mockup-20260531-104213.png)
+<!-- MOCKUPS:END -->
 
 Готовое решение для **личной или корпоративной базы знаний**: документы и ссылки попадают в [LightRAG](https://github.com/HKUDS/LightRAG), ответы и пополнение — через Telegram.
 
