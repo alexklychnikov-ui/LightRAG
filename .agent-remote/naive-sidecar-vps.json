@@ -1,0 +1,1 @@
+{"listen":"socks://127.0.0.1:12335","proxy":"https://naiveuser:__NAIVE_PASS__@alexklyvibe.ru","log":"/opt/naiveproxy/logs/naive-sidecar.log"}

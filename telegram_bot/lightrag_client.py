@@ -351,7 +351,8 @@ class LightRAGClient:
         text: str,
         description: str = "",
     ) -> tuple[bool, str, str | None]:
-        payload = {"text": text}
+        file_source = description.strip() or "telegram:text-ingest"
+        payload = {"text": text, "file_source": file_source}
         if description:
             payload["description"] = description
         try:

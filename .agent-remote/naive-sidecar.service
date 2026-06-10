@@ -1,0 +1,15 @@
+[Unit]
+Description=Naive SOCKS sidecar (loopback to local Caddy)
+After=naiveproxy.service network-online.target
+Wants=naiveproxy.service
+
+[Service]
+Type=simple
+User=root
+ExecStart=/opt/naiveproxy/bin/naive /opt/naiveproxy/config/naive-sidecar.json
+Restart=on-failure
+RestartSec=3
+LimitNOFILE=65535
+
+[Install]
+WantedBy=multi-user.target

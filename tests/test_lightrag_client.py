@@ -223,7 +223,11 @@ class TestLightRAGClient(unittest.TestCase):
         self.assertEqual(track_id, "track-1")
         post_mock.assert_called_once_with(
             "http://127.0.0.1:9621/documents/text",
-            json={"text": "hello", "description": "telegram:test"},
+            json={
+                "text": "hello",
+                "file_source": "telegram:test",
+                "description": "telegram:test",
+            },
             headers={"X-API-Key": "secret"},
             timeout=20,
         )

@@ -1,0 +1,33 @@
+{
+	order forward_proxy before file_server
+	servers {
+		protocols h1 h2
+	}
+}
+
+lightrag.alexklyvibe.ru {
+	encode gzip
+	reverse_proxy 127.0.0.1:9621
+}
+
+:443, alexklyvibe.ru, www.alexklyvibe.ru {
+	log {
+		output file /opt/naiveproxy/logs/access.log
+		format json
+	}
+	tls {
+		issuer acme {
+			email admin@alexklyvibe.ru
+			disable_http_challenge
+		}
+	}
+	forward_proxy {
+		basic_auth naiveuser __NAIVE_PASS__
+		hide_ip
+		hide_via
+		probe_resistance
+	}
+	file_server {
+		root /opt/naiveproxy/www
+	}
+}

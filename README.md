@@ -348,7 +348,7 @@ powershell -ExecutionPolicy Bypass -File ".agent-remote/deploy-telegram-bot.ps1"
 `README.md` на VPS обновляется отдельно (не входит в deploy-скрипт):
 
 ```powershell
-scp -i C:\Users\User\.ssh\alexklyvibe README.md root@193.168.196.12:/opt/LightRAG/README.md
+scp -i C:\Users\User\.ssh\alexklyvibe README.md root@45.144.28.49:/opt/LightRAG/README.md
 ```
 
 Проверка логов:

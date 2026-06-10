@@ -1,5 +1,5 @@
 param(
-    [string]$ServerHost = "193.168.196.12",
+    [string]$ServerHost = "45.144.28.49",
     [string]$User = "root",
     [string]$KeyPath = "C:\Users\User\.ssh\alexklyvibe",
     [string]$RemoteDir = "/opt/LightRAG"

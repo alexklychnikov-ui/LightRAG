@@ -101,25 +101,25 @@
 ### Проверка LightRAG
 
 ```bash
-ssh -i "C:\Users\User\.ssh\alexklyvibe" root@193.168.196.12 "curl -sS http://127.0.0.1:9621/health"
+ssh -i "C:\Users\User\.ssh\alexklyvibe" root@45.144.28.49 "curl -sS http://127.0.0.1:9621/health"
 ```
 
 ### Проверка контейнеров
 
 ```bash
-ssh -i "C:\Users\User\.ssh\alexklyvibe" root@193.168.196.12 "cd /opt/LightRAG && docker compose ps"
+ssh -i "C:\Users\User\.ssh\alexklyvibe" root@45.144.28.49 "cd /opt/LightRAG && docker compose ps"
 ```
 
 ### Логи LightRAG
 
 ```bash
-ssh -i "C:\Users\User\.ssh\alexklyvibe" root@193.168.196.12 "cd /opt/LightRAG && docker compose logs --tail=120 lightrag"
+ssh -i "C:\Users\User\.ssh\alexklyvibe" root@45.144.28.49 "cd /opt/LightRAG && docker compose logs --tail=120 lightrag"
 ```
 
 ### Логи oauth2-proxy
 
 ```bash
-ssh -i "C:\Users\User\.ssh\alexklyvibe" root@193.168.196.12 "docker logs lightrag-auth-oauth2-proxy-1 --tail=120"
+ssh -i "C:\Users\User\.ssh\alexklyvibe" root@45.144.28.49 "docker logs lightrag-auth-oauth2-proxy-1 --tail=120"
 ```
 
 ## 9) После изменений в `.cursor/mcp.json`
