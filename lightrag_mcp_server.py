@@ -262,9 +262,11 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[types.TextCont
             return _ok_response({"status_code": resp.status_code, "data": resp.json()})
 
         if name == "add_text_to_knowledge_base":
+            description = arguments.get("description", "")
             payload = {
                 "text": arguments["text"],
-                "description": arguments.get("description", ""),
+                "description": description,
+                "file_source": description or "mcp:text",
             }
             resp = requests.post(
                 f"{LIGHTRAG_URL}/documents/text",
@@ -301,6 +303,7 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[types.TextCont
             payload = {
                 "text": text,
                 "description": arguments.get("description", source_id),
+                "file_source": source_id,
             }
             resp = requests.post(
                 f"{LIGHTRAG_URL}/documents/text",

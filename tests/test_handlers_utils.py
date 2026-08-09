@@ -53,6 +53,38 @@ class TestHandlerUtils(unittest.TestCase):
         modes = _parse_fallback_modes()
         self.assertEqual(modes, ("hybrid", "global", "naive"))
 
+    def test_resolve_attachment_question_uses_caption(self) -> None:
+        from telegram_bot.handlers import _resolve_attachment_question
+
+        self.assertEqual(
+            _resolve_attachment_question("что думаешь?"),
+            "что думаешь?",
+        )
+
+    def test_resolve_attachment_question_default(self) -> None:
+        from telegram_bot.handlers import (
+            _DEFAULT_ATTACHMENT_QUESTION,
+            _resolve_attachment_question,
+        )
+
+        self.assertEqual(_resolve_attachment_question(None), _DEFAULT_ATTACHMENT_QUESTION)
+        self.assertEqual(_resolve_attachment_question("  "), _DEFAULT_ATTACHMENT_QUESTION)
+
+    def test_build_attachment_prompt_block(self) -> None:
+        from telegram_bot.handlers import _build_attachment_prompt_block
+
+        block = _build_attachment_prompt_block("zeroInput.md", "hello TZ")
+        self.assertIn("zeroInput.md", block)
+        self.assertIn("hello TZ", block)
+
+    def test_extract_text_respects_max_chars(self) -> None:
+        from telegram_bot.file_text_extract import extract_text_from_file_bytes
+
+        payload = ("x" * 5000).encode("utf-8")
+        text = extract_text_from_file_bytes(payload, max_chars=100)
+        self.assertIsNotNone(text)
+        self.assertEqual(len(text or ""), 100)
+
     @patch.dict("os.environ", {"BOT_QUERY_FALLBACK_MODES": "naive,global"})
     def test_parse_fallback_modes_keeps_single_naive(self) -> None:
         modes = _parse_fallback_modes()

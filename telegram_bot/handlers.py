@@ -9,7 +9,11 @@ from aiogram.types import CallbackQuery, Message
 import os
 
 from .domain import BotMode, mode_prompt
-from .file_text_extract import extract_text_from_file_bytes, is_text_like_file
+from .file_text_extract import (
+    extract_text_from_file_bytes,
+    is_text_like_file,
+    qa_attachment_char_limit,
+)
 from .answer_completeness import assess_rag_answer
 from .deep_qa import (
     deep_qa_blocks_openai_fallback,
@@ -62,6 +66,17 @@ _DEFAULT_FALLBACK_MODES = ("hybrid", "global")
 _MODEL_FALLBACK_MODE = "naive"
 _ALLOWED_QUERY_MODES = {"naive", "local", "global", "hybrid", "mix"}
 _STATUS_REFRESH_WORDS = frozenset({"статус", "обновить", "refresh", "status"})
+_DEFAULT_ATTACHMENT_QUESTION = (
+    "Проанализируй приложенный документ: суть задания, ключевые требования, "
+    "сложности, риски и практичный план реализации. "
+    "Можно ли сделать универсальное решение и при каких условиях."
+)
+_ATTACHMENT_ANSWER_SYSTEM = (
+    "Ты технический ассистент. Главный источник — приложенный файл пользователя. "
+    "Фрагменты из базы знаний LightRAG — дополнительный контекст (опыт, кейсы, стек). "
+    "Не выдумывай факты, которых нет в файле или в базе. "
+    "Отвечай на русском, структурированно, по делу."
+)
 
 
 def _is_status_refresh_text(text: str) -> bool:
@@ -87,6 +102,11 @@ def build_lightrag_client() -> LightRAGClient:
 
 
 def _safe_ingest_error(details: str, target: str) -> str:
+    if "status=409" in details or "HTTP 409" in details:
+        return (
+            f"Этот {target} уже есть в базе (дубликат file_source). "
+            "Отправь новое сообщение — после обновления бота каждый ingest уникален."
+        )
     status_match = _STATUS_CODE_PATTERN.search(details)
     if status_match:
         status_code = status_match.group(1)
@@ -299,6 +319,95 @@ async def _apply_rate_limit(message: Message) -> bool:
     )
     _metrics.inc("rate_limited_total")
     return False
+
+
+def _clip_text(text: str, limit: int) -> str:
+    value = (text or "").strip()
+    if len(value) <= limit:
+        return value
+    return value[: limit - 3].rstrip() + "..."
+
+
+def _build_attachment_prompt_block(file_name: str, file_text: str) -> str:
+    return (
+        f"Приложенный файл: {file_name}\n"
+        f"---\n{_clip_text(file_text, qa_attachment_char_limit())}\n---"
+    )
+
+
+def _resolve_attachment_question(caption: str | None) -> str:
+    question = (caption or "").strip()
+    if question:
+        return question
+    return _DEFAULT_ATTACHMENT_QUESTION
+
+
+async def _download_document_bytes(message: Message) -> tuple[bytes | None, str]:
+    document = message.document
+    if document is None:
+        return None, "Файл не найден в сообщении."
+    if document.file_size and document.file_size > _INGEST_FILE_MAX_BYTES:
+        return None, "Файл слишком большой. Лимит 20 MB."
+    file_buffer = BytesIO()
+    try:
+        await message.bot.download(document, destination=file_buffer)
+    except Exception as exc:
+        logger.warning("Telegram file download failed: %s", exc)
+        return None, "Не удалось скачать файл из Telegram."
+    file_bytes = file_buffer.getvalue()
+    if not file_bytes:
+        return None, "Не удалось прочитать файл из Telegram."
+    if len(file_bytes) > _INGEST_FILE_MAX_BYTES:
+        return None, "Файл слишком большой. Лимит 20 MB."
+    return file_bytes, ""
+
+
+async def _answer_with_attachment(
+    client: LightRAGClient,
+    *,
+    question: str,
+    contextual_question: str,
+    attachment_name: str,
+    attachment_text: str,
+    start_mode: str,
+    fallback_modes: tuple[str, ...],
+    openai_model: str,
+) -> tuple[bool, str, str, str]:
+    rag_ok, rag_answer, used_mode = await asyncio.to_thread(
+        client.ask_with_fallback,
+        contextual_question,
+        start_mode,
+        fallback_modes,
+    )
+    rag_block = ""
+    if rag_ok and not client.is_weak_answer(rag_answer):
+        rag_block = (
+            "\n\nДополнительный контекст из базы знаний LightRAG:\n"
+            f"{_clip_text(rag_answer, 8000)}"
+        )
+        mode_label = f"{used_mode} + attachment"
+    else:
+        mode_label = "attachment"
+        if not rag_ok:
+            logger.warning("Attachment QA RAG failed: %s", rag_answer)
+
+    user_prompt = (
+        f"Вопрос пользователя:\n{_clip_text(question, 4000)}\n\n"
+        f"{_build_attachment_prompt_block(attachment_name, attachment_text)}"
+        f"{rag_block}"
+    )
+    openai_ok, openai_answer = await asyncio.to_thread(
+        client.query_openai_chat,
+        _ATTACHMENT_ANSWER_SYSTEM,
+        user_prompt,
+        temperature=0.25,
+        model=openai_model,
+    )
+    if openai_ok and openai_answer.strip():
+        return True, openai_answer.strip(), mode_label, "файл + LightRAG"
+    if rag_ok and not client.is_weak_answer(rag_answer):
+        return True, rag_answer, used_mode, "LightRAG (без синтеза файла)"
+    return False, openai_answer if not openai_ok else "empty attachment answer", mode_label, ""
 
 
 async def _notify_track_status(
@@ -621,11 +730,11 @@ async def ingest_text_handler(message: Message, state: FSMContext) -> None:
             logger.warning("URL fetch failed: %s", extracted_or_error)
             return
         ingest_text = extracted_or_error
-        description = f"telegram:url chat={message.chat.id} src={normalized_text}"
+        description = f"telegram:url chat={message.chat.id} msg={message.message_id} src={normalized_text}"
     else:
         await message.answer("Принял. Добавляю текст в базу знаний...")
         ingest_text = normalized_text
-        description = f"telegram:text chat={message.chat.id}"
+        description = f"telegram:text chat={message.chat.id} msg={message.message_id}"
 
     if translate_enabled and needs_translation_to_ru(ingest_text):
         await message.answer("Обнаружен не-русский текст. Делаю авто-перевод на русский...")
@@ -761,7 +870,7 @@ async def ingest_document_handler(message: Message, state: FSMContext) -> None:
             description,
         )
     else:
-        description = f"telegram:file chat={message.chat.id}"
+        description = f"telegram:file chat={message.chat.id} msg={message.message_id}"
         file_mode_label = "оригинал"
         ok, details, track_id = await asyncio.to_thread(
             client.ingest_file,
@@ -826,11 +935,21 @@ async def status_mode_text_handler(message: Message, state: FSMContext) -> None:
 
 
 @router.message(BotStates.qa_mode, F.text)
-async def qa_question_handler(message: Message, state: FSMContext) -> None:
-    if not await _apply_rate_limit(message):
+async def qa_question_handler(
+    message: Message,
+    state: FSMContext,
+    *,
+    question_override: str | None = None,
+    attachment_text: str | None = None,
+    attachment_name: str | None = None,
+    skip_rate_limit: bool = False,
+) -> None:
+    if not skip_rate_limit and not await _apply_rate_limit(message):
         return
     _metrics.inc("qa_total")
-    question = (message.text or "").strip()
+    if attachment_text:
+        _metrics.inc("qa_attachment_total")
+    question = (question_override if question_override is not None else (message.text or "")).strip()
     if not question:
         await message.answer(
             "Пустой вопрос не отправляю. Напиши вопрос текстом.",
@@ -851,111 +970,145 @@ async def qa_question_handler(message: Message, state: FSMContext) -> None:
     fallback_modes = _parse_fallback_modes()
 
     await qa_conversation_store.expire_if_idle(message.chat.id)
-    contextual_question = await qa_conversation_store.build_contextual_query(
+    base_contextual = await qa_conversation_store.build_contextual_query(
         message.chat.id,
         effective_question,
     )
+    if attachment_text and attachment_name:
+        contextual_question = (
+            f"{base_contextual}\n\n"
+            f"{_build_attachment_prompt_block(attachment_name, attachment_text)}"
+        )
+    else:
+        contextual_question = base_contextual
 
     client = build_lightrag_client()
     model_hint = _openai_model_price_hint(openai_model)
     chat_context = await qa_conversation_store.get_dialog_context_block(message.chat.id)
     deep_task_type = ""
     used_deep_qa = False
+    web_references: tuple = ()
+    web_notice = ""
 
-    if is_deep_qa_enabled():
+    if attachment_text and attachment_name:
         await message.answer(
-            "Принял вопрос. Глубокий поиск в базе знаний "
-            f"(несколько запросов LightRAG; OpenAI: {openai_model} {model_hint})…",
+            f"Файл «{attachment_name}» ({len(attachment_text)} симв.): "
+            f"ответ через OpenAI {openai_model} {model_hint} + LightRAG {start_mode}…",
             reply_markup=persistent_menu_keyboard(),
         )
-        deep_ok, deep_outcome, deep_err = await asyncio.to_thread(
-            run_deep_qa,
-            contextual_question,
-            effective_question,
-            client=client,
-            primary_mode=start_mode,
+        ok, answer_or_error, used_mode, source_label = await _answer_with_attachment(
+            client,
+            question=effective_question,
+            contextual_question=contextual_question,
+            attachment_name=attachment_name,
+            attachment_text=attachment_text,
+            start_mode=start_mode,
             fallback_modes=fallback_modes,
-            chat_context=chat_context,
             openai_model=openai_model,
         )
-        if deep_ok and deep_outcome is not None:
-            _metrics.inc("qa_deep_success_total")
-            used_deep_qa = True
-            rag_answer = deep_outcome.answer
-            used_mode = deep_outcome.mode_label
-            deep_task_type = deep_outcome.task_type
-            if deep_err:
-                logger.info("Deep QA plan note: %s", deep_err)
-        else:
-            _metrics.inc("qa_deep_fallback_total")
-            logger.warning("Deep QA failed, fallback to single query: %s", deep_err)
-            await message.answer(
-                "Глубокий поиск не удался, пробую обычный запрос в LightRAG…",
-                reply_markup=persistent_menu_keyboard(),
-            )
-
-    if not used_deep_qa:
-        await message.answer(
-            "Принял вопрос. Ищу ответ в LightRAG "
-            f"(старт: {start_mode}, fallback: {','.join(fallback_modes)}; "
-            f"OpenAI: {openai_model} {model_hint})...",
-            reply_markup=persistent_menu_keyboard(),
-        )
-        ok, answer_or_error, used_mode = await asyncio.to_thread(
-            client.ask_with_fallback,
-            contextual_question,
-            start_mode,
-            fallback_modes,
-        )
         if not ok:
-            logger.warning("QA query failed: %s (%s)", answer_or_error, used_mode)
+            logger.warning("Attachment QA failed: %s", answer_or_error)
             _metrics.inc("qa_failed_total")
+            _metrics.inc("qa_attachment_failed_total")
             await message.answer(
-                "Не удалось получить ответ из LightRAG. Попробуй снова.",
+                "Не удалось разобрать файл и ответить. Попробуй снова или вставь текст вручную.",
                 reply_markup=persistent_menu_keyboard(),
             )
             return
-        rag_answer = answer_or_error
-
-    skip_web = used_deep_qa and deep_qa_skips_web_enrichment(deep_task_type)
-    if skip_web:
-        final_answer = rag_answer
-        source_label = "LightRAG (глубокий, только БЗ)"
-        web_references: tuple = ()
-        web_notice = ""
+        final_answer = answer_or_error
     else:
-        final_answer, source_label, used_mode, web_references, web_notice = (
-            await _try_enrich_with_web_search(
-                message,
-                client,
-                contextual_question=contextual_question,
-                effective_question=effective_question,
-                rag_answer=rag_answer,
-                used_mode=used_mode,
+        if is_deep_qa_enabled():
+            await message.answer(
+                "Принял вопрос. Глубокий поиск в базе знаний "
+                f"(несколько запросов LightRAG; OpenAI: {openai_model} {model_hint})…",
+                reply_markup=persistent_menu_keyboard(),
+            )
+            deep_ok, deep_outcome, deep_err = await asyncio.to_thread(
+                run_deep_qa,
+                contextual_question,
+                effective_question,
+                client=client,
+                primary_mode=start_mode,
+                fallback_modes=fallback_modes,
+                chat_context=chat_context,
                 openai_model=openai_model,
             )
-        )
-    web_enriched = bool(web_references)
+            if deep_ok and deep_outcome is not None:
+                _metrics.inc("qa_deep_success_total")
+                used_deep_qa = True
+                rag_answer = deep_outcome.answer
+                used_mode = deep_outcome.mode_label
+                deep_task_type = deep_outcome.task_type
+                if deep_err:
+                    logger.info("Deep QA plan note: %s", deep_err)
+            else:
+                _metrics.inc("qa_deep_fallback_total")
+                logger.warning("Deep QA failed, fallback to single query: %s", deep_err)
+                await message.answer(
+                    "Глубокий поиск не удался, пробую обычный запрос в LightRAG…",
+                    reply_markup=persistent_menu_keyboard(),
+                )
 
-    openai_fallback_allowed = _is_openai_fallback_enabled() and not (
-        used_deep_qa and deep_qa_blocks_openai_fallback()
-    )
-    if (
-        openai_fallback_allowed
-        and not web_enriched
-        and client.is_weak_answer(final_answer)
-    ):
-        openai_ok, openai_answer = await asyncio.to_thread(
-            client.query_openai_general,
-            contextual_question,
-            model=openai_model,
+        if not used_deep_qa:
+            await message.answer(
+                "Принял вопрос. Ищу ответ в LightRAG "
+                f"(старт: {start_mode}, fallback: {','.join(fallback_modes)}; "
+                f"OpenAI: {openai_model} {model_hint})...",
+                reply_markup=persistent_menu_keyboard(),
+            )
+            ok, answer_or_error, used_mode = await asyncio.to_thread(
+                client.ask_with_fallback,
+                contextual_question,
+                start_mode,
+                fallback_modes,
+            )
+            if not ok:
+                logger.warning("QA query failed: %s (%s)", answer_or_error, used_mode)
+                _metrics.inc("qa_failed_total")
+                await message.answer(
+                    "Не удалось получить ответ из LightRAG. Попробуй снова.",
+                    reply_markup=persistent_menu_keyboard(),
+                )
+                return
+            rag_answer = answer_or_error
+
+        skip_web = used_deep_qa and deep_qa_skips_web_enrichment(deep_task_type)
+        if skip_web:
+            final_answer = rag_answer
+            source_label = "LightRAG (глубокий, только БЗ)"
+        else:
+            final_answer, source_label, used_mode, web_references, web_notice = (
+                await _try_enrich_with_web_search(
+                    message,
+                    client,
+                    contextual_question=contextual_question,
+                    effective_question=effective_question,
+                    rag_answer=rag_answer,
+                    used_mode=used_mode,
+                    openai_model=openai_model,
+                )
+            )
+        web_enriched = bool(web_references)
+
+        openai_fallback_allowed = _is_openai_fallback_enabled() and not (
+            used_deep_qa and deep_qa_blocks_openai_fallback()
         )
-        if openai_ok and not client.is_weak_answer(openai_answer):
-            final_answer = openai_answer
-            base_mode = used_mode.split(" -> web")[0]
-            used_mode = f"{base_mode} -> openai"
-            source_label = "модель (вне RAG)"
-            web_references = ()
+        if (
+            openai_fallback_allowed
+            and not web_enriched
+            and client.is_weak_answer(final_answer)
+        ):
+            openai_ok, openai_answer = await asyncio.to_thread(
+                client.query_openai_general,
+                contextual_question,
+                model=openai_model,
+            )
+            if openai_ok and not client.is_weak_answer(openai_answer):
+                final_answer = openai_answer
+                base_mode = used_mode.split(" -> web")[0]
+                used_mode = f"{base_mode} -> openai"
+                source_label = "модель (вне RAG)"
+                web_references = ()
 
     translated_mode = "оригинал"
     if is_translate_to_ru_enabled() and needs_translation_to_ru(final_answer):
@@ -973,21 +1126,90 @@ async def qa_question_handler(message: Message, state: FSMContext) -> None:
         final_answer = format_answer_with_references(final_answer, web_references)
 
     notice_prefix = f"{web_notice}\n\n" if web_notice else ""
+    attachment_note = (
+        f"Вложение: {attachment_name}\n" if attachment_name and attachment_text else ""
+    )
     await _send_long_message(
         message,
         (
             f"Режим поиска: {used_mode}\n"
             f"Модель OpenAI: {openai_model}\n"
             f"Источник ответа: {source_label}\n"
+            f"{attachment_note}"
             f"Режим ответа: {translated_mode}\n\n{notice_prefix}{final_answer}"
         ),
     )
     _metrics.inc("qa_success_total")
+    if attachment_text:
+        _metrics.inc("qa_attachment_success_total")
     await qa_conversation_store.record_exchange(
         message.chat.id,
         effective_question,
         answer_body_without_references(final_answer),
     )
+
+
+async def _route_document_to_qa(message: Message, state: FSMContext) -> None:
+    file_bytes, err = await _download_document_bytes(message)
+    if file_bytes is None:
+        await message.answer(err, reply_markup=persistent_menu_keyboard())
+        return
+
+    document = message.document
+    file_name = (document.file_name if document else None) or "attachment.bin"
+    mime_type = document.mime_type if document else None
+    if not is_text_like_file(file_name, mime_type):
+        await message.answer(
+            "В Q&A читаю текстовые файлы (.md/.txt/.json/…). "
+            "Для бинарных — режим «Добавить в базу», либо вставь текст в сообщение.",
+            reply_markup=persistent_menu_keyboard(),
+        )
+        return
+
+    file_text = extract_text_from_file_bytes(
+        file_bytes,
+        max_chars=qa_attachment_char_limit(),
+    )
+    if not file_text:
+        await message.answer(
+            "Не смог извлечь текст из файла. Проверь кодировку или отправь .md/.txt.",
+            reply_markup=persistent_menu_keyboard(),
+        )
+        return
+
+    question = _resolve_attachment_question(message.caption)
+    await state.set_state(BotStates.qa_mode)
+    await qa_question_handler(
+        message,
+        state,
+        question_override=question,
+        attachment_text=file_text,
+        attachment_name=file_name,
+        skip_rate_limit=False,
+    )
+
+
+@router.message(BotStates.qa_mode, F.document)
+async def qa_document_handler(message: Message, state: FSMContext) -> None:
+    await _route_document_to_qa(message, state)
+
+
+@router.message(BotStates.choosing_mode, F.document)
+async def choosing_mode_document_handler(message: Message, state: FSMContext) -> None:
+    await state.set_state(BotStates.qa_mode)
+    await _route_document_to_qa(message, state)
+
+
+@router.message(BotStates.status_mode, F.document)
+async def status_mode_document_handler(message: Message, state: FSMContext) -> None:
+    await state.set_state(BotStates.qa_mode)
+    await _route_document_to_qa(message, state)
+
+
+@router.message(F.document, StateFilter(None))
+async def fallback_document_handler(message: Message, state: FSMContext) -> None:
+    await state.set_state(BotStates.qa_mode)
+    await _route_document_to_qa(message, state)
 
 
 @router.message(F.text, StateFilter(None))
