@@ -8,7 +8,7 @@
 
 
 <!-- MOCKUPS:START -->
-![Mockup](Docs/mockups/mockup-20260615-201248.png)
+![Mockup](Docs/mockups/mockup-20260901-125300.png)
 <!-- MOCKUPS:END -->
 
 Готовое решение для **личной или корпоративной базы знаний**: документы и ссылки попадают в [LightRAG](https://github.com/HKUDS/LightRAG), ответы и пополнение — через Telegram.
